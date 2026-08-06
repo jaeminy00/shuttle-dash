@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Departure Board</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --muted:       #898781;
+    --border:      rgba(255,255,255,0.10);
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --critical:    #d03b3b;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column;
+    padding: clamp(8px, 2vmin, 24px);
+    gap: clamp(6px, 1.5vmin, 16px);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header { display: flex; align-items: center; gap: 12px; }
+  .tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 999px;
+          padding: 3px; gap: 3px; background: var(--surface); }
+  .tabs button {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font: inherit; font-size: clamp(13px, 2.4vmin, 18px); font-weight: 650;
+    padding: .25em 1em; border-radius: 999px;
+  }
+  .tabs button.active { background: #2e2e2c; color: var(--ink); }
+  .clock { margin-left: auto; color: var(--muted); font-size: clamp(13px, 2.4vmin, 20px);
+           font-variant-numeric: tabular-nums; }
+
+  .grid {
+    flex: 1 1 auto; min-height: 0;
+    display: grid; gap: clamp(6px, 1.5vmin, 16px);
+    grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
+    align-content: stretch;
+  }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; min-height: 0;
+    display: flex; flex-direction: column;
+    padding: clamp(8px, 1.6vmin, 18px);
+    gap: clamp(4px, 1vmin, 10px);
+  }
+  .card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .route-chip { display: inline-flex; align-items: center; gap: 7px;
+                font-size: clamp(14px, 2.8vmin, 22px); font-weight: 650; }
+  .route-dot { width: .75em; height: .75em; border-radius: 50%; flex: none; }
+  .stop-name { color: var(--muted); font-size: clamp(11px, 2vmin, 15px); }
+
+  .card-hero { text-align: center; margin: auto 0; }
+  .hero-value { font-size: clamp(44px, 12vmin, 120px); font-weight: 700;
+                line-height: 1.05; letter-spacing: -0.02em; }
+  .hero-value small { font-size: .3em; font-weight: 600; color: var(--ink-2); margin-left: .1em; }
+  .hero-sub { color: var(--muted); font-size: clamp(11px, 2vmin, 16px); margin-top: 2px;
+              font-variant-numeric: tabular-nums; }
+
+  .status-pill {
+    display: inline-flex; align-items: center; gap: .45em;
+    border-radius: 999px; padding: .22em .8em; margin-top: 4px;
+    font-size: clamp(12px, 2.4vmin, 19px); font-weight: 650;
+    border: 2px solid transparent;
+    white-space: nowrap;
+  }
+  .status-good     { color: var(--good);     border-color: var(--good); }
+  .status-warning  { color: var(--warning);  border-color: var(--warning); }
+  .status-critical { color: var(--critical); border-color: var(--critical);
+                     animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
+
+  .rows { border-top: 1px solid var(--border); }
+  .dep-row {
+    display: flex; align-items: baseline; gap: clamp(6px, 1.4vmin, 14px);
+    padding: clamp(5px, 1vmin, 10px) 0;
+    font-size: clamp(13px, 2.6vmin, 21px);
+    border-bottom: 1px solid var(--border);
+    font-variant-numeric: tabular-nums;
+  }
+  .dep-row:last-child { border-bottom: none; }
+  .dep-time { font-weight: 650; min-width: 5.2ch; white-space: nowrap; flex: none; }
+  .dep-count { color: var(--ink-2); white-space: nowrap; flex: none; }
+  .headsign { color: var(--muted); font-size: .78em; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .dep-meta { margin-left: auto; display: flex; align-items: baseline; gap: .9em;
+              font-size: .6em; color: var(--muted); flex: none; }
+  .dep-row.missed { opacity: .38; }
+  .dep-row.missed .dep-time { text-decoration: line-through; text-decoration-thickness: 2px; }
+  .dep-row.cancelled .dep-time { text-decoration: line-through; color: var(--critical); }
+  .badge { display: inline-flex; align-items: center; gap: .4em; }
+  .badge .dot { width: .55em; height: .55em; border-radius: 50%; background: var(--good);
+                animation: blink 2s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
+  .late  { color: var(--warning); }
+  .early { color: #3987e5; }
+
+  .card-alert { color: var(--warning); font-size: clamp(11px, 2vmin, 14px); }
+  .card-error { color: var(--warning); font-size: clamp(12px, 2.2vmin, 16px);
+                margin: auto 0; text-align: center; }
+
+  .card-foot { display: flex; align-items: center; gap: 10px;
+               color: var(--muted); font-size: clamp(10px, 1.9vmin, 14px); }
+  .walk-ctl { display: inline-flex; align-items: center; gap: 6px; }
+  .walk-ctl button {
+    background: none; color: var(--ink-2);
+    border: 1px solid var(--border); border-radius: 6px;
+    width: 2em; height: 2em; font-size: inherit; cursor: pointer;
+  }
+  .walk-ctl button:active { background: #262624; }
+  .freshness { margin-left: auto; }
+  .freshness.stale { color: var(--warning); }
+
+  /* ---------- compact layout for small/short screens (e.g. 480x320 Pi TFT) ---------- */
+  @media (max-height: 500px) {
+    body { padding: 6px; gap: 4px; }
+    header { gap: 6px; }
+    .tabs { padding: 2px; }
+    .tabs button { font-size: 11px; padding: .15em .7em; }
+    .clock { font-size: 11px; }
+    .grid { grid-template-columns: 1fr; }
+    .card { border-radius: 8px; padding: 6px 10px; gap: 2px;
+            display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 12px; }
+    .card-head { grid-column: 1 / -1; }
+    .card-hero { margin: 0; display: flex; align-items: baseline; gap: 10px; }
+    .hero-value { font-size: clamp(28px, 11vmin, 44px); }
+    .hero-sub { display: none; }
+    .status-pill { margin: 0; font-size: 12px; border-width: 1px; padding: .15em .6em; }
+    .rows { border-top: none; }
+    .dep-row { font-size: 13px; padding: 2px 0; border: none; }
+    .dep-row:nth-child(n+3) { display: none; }   /* max 2 rows per card */
+    .card-foot { display: none; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <nav class="tabs" id="tabs"></nav>
+    <span class="clock" id="clock">–:–</span>
+  </header>
+  <main class="grid" id="grid"></main>
+
+<script>
+"use strict";
+let data = null;
+let clockOffset = 0;        // serverNow - clientNow (s)
+let tz;
+let activeTab = null;       // resolved on first payload
+const walkOverride = {};    // board title -> minutes (persisted)
+
+function tabList() {
+  const seen = [];
+  for (const b of data.boards) if (!seen.includes(b.tab)) seen.push(b.tab);
+  return seen;
+}
+function resolveTab() {
+  const fromUrl = new URLSearchParams(location.search).get("tab");
+  const saved = localStorage.getItem("tab");
+  const tabs = tabList();
+  for (const cand of [fromUrl, saved, data.default_tab]) {
+    if (cand && tabs.includes(cand)) return cand;
+  }
+  return tabs[0];
+}
+
+function now() { return Date.now() / 1000 + clockOffset; }
+function fmtTime(epoch) {
+  return new Date(epoch * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZone: tz });
+}
+function dayOf(epoch) {
+  return new Date(epoch * 1000).toLocaleDateString("en-CA", { timeZone: tz });
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function walkFor(b) {
+  if (b.title in walkOverride) return walkOverride[b.title];
+  const saved = parseInt(localStorage.getItem("walk:" + b.title) || "", 10);
+  return Number.isFinite(saved) ? saved : b.walk_minutes;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/board");
+    data = await r.json();
+    clockOffset = data.now - Date.now() / 1000;
+    tz = data.timezone;
+  } catch (e) { /* keep last data */ }
+  render();
+}
+
+function cardHTML(b, t) {
+  const head = `<div class="card-head">
+      <span class="route-chip"><span class="route-dot" style="background:${esc(b.route_color)}"></span>${esc(b.title)}</span>
+      <span class="stop-name">${esc(b.stop)}</span>
+    </div>`;
+
+  if (b.error) {
+    return head + `<div class="card-error">⚠︎ ${esc(b.error)}</div>`;
+  }
+
+  const walk = walkFor(b);
+  const deps = b.departures.filter(d => d.time > t - 30);
+  const catchable = deps.filter(d => !d.cancelled && (d.time - t) / 60 >= walk);
+  const hero = catchable[0];
+  const showHeadsigns = new Set(deps.map(d => d.headsign).filter(Boolean)).size > 1;
+
+  let heroHTML;
+  if (hero) {
+    const mins = (hero.time - t) / 60;
+    const whole = Math.floor(mins);
+    const value = whole >= 60
+      ? Math.floor(whole / 60) + "<small>h</small> " + (whole % 60) + "<small>min</small>"
+      : whole + "<small>min</small>";
+    const slack = mins - walk;
+    const leaveBy = fmtTime(hero.time - walk * 60);
+    let pill;
+    if (slack < 2)      pill = `<span class="status-pill status-critical">🏃 Leave now</span>`;
+    else if (slack < 5) pill = `<span class="status-pill status-warning">⏰ Leave soon — by ${leaveBy}</span>`;
+    else                pill = `<span class="status-pill status-good">✓ Leave by ${leaveBy}</span>`;
+    const tomorrow = dayOf(hero.time) !== dayOf(t) ? "tomorrow " : "";
+    const hs = hero.headsign && showHeadsigns ? " → " + esc(hero.headsign) : "";
+    heroHTML = `<div class="card-hero">
+        <div class="hero-value">${value}</div>
+        ${pill}
+        <div class="hero-sub">departs ${tomorrow}${fmtTime(hero.time)}${hs}${hero.realtime ? " · live" : " · sched"}</div>
+      </div>`;
+  } else {
+    heroHTML = `<div class="card-hero">
+        <div class="hero-value" style="color:var(--muted)">—</div>
+        <div class="hero-sub">${deps.length ? "can't reach the stop in time for the ones below"
+                                            : "no departures in the next 24 h"}</div>
+      </div>`;
+  }
+
+  const rowsHTML = deps.map(d => {
+    const mins = Math.floor((d.time - t) / 60);
+    const missed = !d.cancelled && (d.time - t) / 60 < walk;
+    const cls = "dep-row" + (d.cancelled ? " cancelled" : missed ? " missed" : "");
+    const delayMin = Math.round(d.delay / 60);
+    const delayTxt = d.cancelled ? '<span class="late">cancelled</span>'
+      : d.realtime && delayMin >= 1 ? `<span class="late">+${delayMin} min</span>`
+      : d.realtime && delayMin <= -1 ? `<span class="early">${delayMin} min</span>` : "";
+    const badge = d.cancelled ? "" : d.realtime
+      ? '<span class="badge"><span class="dot"></span>live</span>'
+      : '<span class="badge">sched</span>';
+    const tmrw = dayOf(d.time) !== dayOf(t) ? "tmrw · " : "";
+    const count = d.cancelled ? "" : mins < 1 ? "due"
+      : mins < 90 ? tmrw + "in " + mins + " min"
+      : tmrw + "in " + Math.floor(mins / 60) + "h " + (mins % 60) + "m";
+    const hs = showHeadsigns && d.headsign ? `<span class="headsign">→ ${esc(d.headsign)}</span>` : "";
+    return `<div class="${cls}">
+        <span class="dep-time">${fmtTime(d.time)}</span>
+        <span class="dep-count">${count}</span>${hs}
+        <span class="dep-meta">${delayTxt}${badge}${missed ? "<span>too late</span>" : ""}</span>
+      </div>`;
+  }).join("");
+
+  const alertsHTML = (b.alerts && b.alerts.length)
+    ? `<div class="card-alert">⚠︎ ${esc(b.alerts.join("  ·  "))}</div>` : "";
+
+  const s = data.sources[b.source] || {};
+  const age = s.rt_age === null || s.rt_age === undefined ? null : s.rt_age + (t - data.now);
+  const stale = age !== null && age > Math.max(120, (s.poll_seconds || 20) * 2.5);
+  const fresh = age === null
+    ? (s.rt_error ? "live data unavailable" : "no live data")
+    : stale ? "⚠︎ stale — schedule only" : "live " + (age < 5 ? "now" : Math.round(age) + "s ago");
+
+  const foot = `<div class="card-foot">
+      <span class="walk-ctl">
+        <button data-walk="-1" data-board="${esc(b.title)}">−</button>
+        walk <b style="color:var(--ink-2)">${walk}</b> min
+        <button data-walk="1" data-board="${esc(b.title)}">+</button>
+      </span>
+      <span class="freshness${stale ? " stale" : ""}">${fresh}</span>
+    </div>`;
+
+  return head + alertsHTML + heroHTML + `<div class="rows">${rowsHTML}</div>` + foot;
+}
+
+function render() {
+  if (!data || !data.boards) return;
+  if (activeTab === null) activeTab = resolveTab();
+  const t = now();
+  document.getElementById("clock").textContent = new Date(t * 1000)
+      .toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", timeZone: tz });
+  document.getElementById("tabs").innerHTML = tabList().map(tab =>
+      `<button data-tab="${esc(tab)}" class="${tab === activeTab ? "active" : ""}">${esc(tab.toUpperCase())}</button>`
+    ).join("");
+  const grid = document.getElementById("grid");
+  grid.innerHTML = data.boards.filter(b => b.tab === activeTab)
+      .map(b => `<section class="card">${cardHTML(b, t)}</section>`).join("");
+}
+
+document.getElementById("tabs").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-tab]");
+  if (!btn) return;
+  activeTab = btn.dataset.tab;
+  localStorage.setItem("tab", activeTab);
+  render();
+});
+
+document.getElementById("grid").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-walk]");
+  if (!btn) return;
+  const title = btn.dataset.board;
+  const b = data.boards.find(x => x.title === title);
+  if (!b) return;
+  const cur = walkFor(b);
+  const next = Math.max(0, Math.min(60, cur + parseInt(btn.dataset.walk, 10)));
+  walkOverride[title] = next;
+  localStorage.setItem("walk:" + title, next);
+  render();
+});
+
+refresh();
+setInterval(refresh, 10000);   // re-fetch from server
+setInterval(render, 1000);     // tick countdowns locally
+</script>
+</body>
+</html>

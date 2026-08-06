@@ -1,0 +1,156 @@
+{
+  "timezone": "America/Los_Angeles",
+  "default_tab": "work",
+  "sources": {
+    "lbnl": {
+      "gtfs_static_url": "https://lbnl.tripshot.com/v1/gtfs.zip?regionId=CA558DDC-D7F2-4B48-9CAC-DEEA1134F820",
+      "gtfs_rt_url": "https://lbnl.tripshot.com/v1/gtfs/realtime/CA558DDC-D7F2-4B48-9CAC-DEEA1134F820"
+    },
+    "actransit": {
+      "gtfs_static_url": "https://api.actransit.org/transit/gtfs/current?token={token}",
+      "gtfs_rt_url": "https://api.actransit.org/transit/gtfsrt/tripupdates?token={token}",
+      "token": "PASTE_YOUR_ACTRANSIT_TOKEN_HERE"
+    },
+    "ucb": {
+      "type": "timetable",
+      "note": "Bear Transit has no public feed; times from official printed timetables (pt.berkeley.edu, Oct 2025)"
+    },
+    "bart": {
+      "type": "bart_etd",
+      "station": "DBRK",
+      "token": "PASTE_YOUR_BART_KEY_HERE",
+      "poll_seconds": 45
+    },
+    "muni": {
+      "gtfs_static_url": "https://api.511.org/transit/datafeeds?api_key={token}&operator_id=SF",
+      "gtfs_rt_url": "https://api.511.org/transit/tripupdates?api_key={token}&agency=SF",
+      "token": "PASTE_YOUR_511_TOKEN_HERE",
+      "note": "511.org example (SF Muni); free token: https://511.org/open-data/token"
+    }
+  },
+  "boards": [
+    {
+      "title": "Blue Uphill",
+      "tab": "work",
+      "source": "lbnl",
+      "route": "Blue Route Uphill",
+      "stop": "Oxford At University",
+      "walk_minutes": 10
+    },
+    {
+      "title": "52 to campus",
+      "tab": "work",
+      "source": "actransit",
+      "route": "52",
+      "stop": "50400",
+      "walk_minutes": 10,
+      "route_color": "#e87ba4"
+    },
+    {
+      "title": "F Transbay",
+      "tab": "work",
+      "source": "actransit",
+      "route": "F",
+      "stop": "52848",
+      "walk_minutes": 8,
+      "route_color": "#d95926"
+    },
+    {
+      "title": "P Line",
+      "tab": "work",
+      "source": "ucb",
+      "stop": "Oxford St & University Ave (Li Ka Shing)",
+      "walk_minutes": 10,
+      "times": [
+        "07:02",
+        "07:32",
+        "08:02",
+        "08:32",
+        "09:02",
+        "09:32",
+        "10:02",
+        "10:32",
+        "11:02",
+        "11:32",
+        "12:02",
+        "12:32",
+        "13:02",
+        "13:32",
+        "14:02",
+        "14:32",
+        "15:02",
+        "15:32",
+        "16:02",
+        "16:32",
+        "17:02",
+        "17:32",
+        "18:02",
+        "18:32",
+        "19:02"
+      ],
+      "days": "weekdays",
+      "route_color": "#FDB515"
+    },
+    {
+      "title": "C Line",
+      "tab": "work",
+      "source": "ucb",
+      "stop": "Oxford St & University Ave (Li Ka Shing)",
+      "walk_minutes": 10,
+      "times": [
+        "06:47",
+        "07:07",
+        "07:27",
+        "07:47",
+        "08:07",
+        "08:27",
+        "08:47",
+        "09:07",
+        "09:27",
+        "09:47",
+        "10:07",
+        "10:27",
+        "10:47",
+        "16:37",
+        "16:57",
+        "17:17",
+        "17:37",
+        "17:57",
+        "18:17",
+        "18:37"
+      ],
+      "days": "weekdays",
+      "route_color": "#3B7EA1"
+    },
+    {
+      "title": "F to Salesforce",
+      "tab": "sf",
+      "source": "actransit",
+      "route": "F",
+      "stop": "55999",
+      "walk_minutes": 12,
+      "route_color": "#d95926"
+    },
+    {
+      "title": "Red to Millbrae",
+      "tab": "sf",
+      "source": "bart",
+      "walk_minutes": 12,
+      "direction": "South",
+      "color": "RED"
+    },
+    {
+      "title": "Orange to Berryessa",
+      "tab": "sf",
+      "source": "bart",
+      "walk_minutes": 12,
+      "direction": "South",
+      "color": "ORANGE"
+    }
+  ],
+  "departures_shown": 3,
+  "rt_poll_seconds": 20,
+  "static_refresh_hours": 24,
+  "port": 8146,
+  "cache_dir": "~/.cache/shuttle-dash"
+}
