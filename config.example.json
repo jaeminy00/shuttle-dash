@@ -148,6 +148,40 @@
       "color": "ORANGE"
     }
   ],
+  "weather": {
+    "lat": 37.8716,
+    "lon": -122.2727,
+    "poll_seconds": 900,
+    "hours_shown": 12,
+    "note": "Open-Meteo — no API key, no signup. Remove this block to drop weather from the panel."
+  },
+  "house": {
+    "trash_day": "Wednesday",
+    "trash_kinds": "Compost + recycling",
+    "note": "52 detour at Shattuck through Sep 2 — board at Oxford & Center."
+  },
+  "panel": {
+    "night_start": "22:00",
+    "night_end": "06:00",
+    "times_shown": 3,
+    "groups": [
+      {
+        "title": "LBL",
+        "accent": "#8fd4c1",
+        "boards": [
+          { "board": "Blue Uphill", "label": "BLUE", "via": "Blue Line" }
+        ]
+      },
+      {
+        "title": "Campus",
+        "accent": "#f0b429",
+        "boards": [
+          { "board": "52 to campus", "label": "52", "via": "Bus 52" },
+          { "board": "F Transbay", "label": "F", "via": "Bus F" }
+        ]
+      }
+    ]
+  },
   "departures_shown": 3,
   "rt_poll_seconds": 20,
   "static_refresh_hours": 24,

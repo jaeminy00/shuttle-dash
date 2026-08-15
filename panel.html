@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shuttle Panel</title>
+<link rel="preconnect" href="https://fonts.gstatic.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700&family=IBM+Plex+Mono:wght@200;300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* The panel is authored at exactly 1080 x 1920 (the wall screen) and
+     scaled to fit whatever viewport it lands in, so every number below is
+     a literal design pixel. */
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body { background: #0c0d0c; -webkit-font-smoothing: antialiased; }
+
+  #stage {
+    position: absolute; top: 0; left: 0;
+    width: 1080px; height: 1920px;
+    transform-origin: top left;
+  }
+
+  .panel { width: 1080px; height: 1920px; box-sizing: border-box;
+           font-family: 'Barlow Condensed', system-ui, sans-serif; }
+  .mono  { font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; }
+  [hidden] { display: none !important; }
+
+  /* ---------------------------------------------------------- day state */
+
+  #day {
+    background: #0c0d0c; color: #f4f1ea;
+    display: flex; flex-direction: column;
+    padding: 48px 52px 40px;
+  }
+
+  .head { display: flex; justify-content: space-between; align-items: flex-start; }
+  .clock { font-family: 'IBM Plex Mono', monospace; font-weight: 400;
+           font-size: 158px; line-height: 1; letter-spacing: -5px; }
+  .dateline { font-size: 40px; font-weight: 600; letter-spacing: 6px;
+              text-transform: uppercase; color: #8d8a80; margin-top: 6px;
+              white-space: nowrap; }
+
+  .wx { flex: none; min-width: 360px; text-align: right; display: flex;
+        flex-direction: column; gap: 8px; padding-top: 6px; white-space: nowrap; }
+  .wx-temps { display: flex; justify-content: flex-end; align-items: baseline; gap: 16px; }
+  .wx-f, .wx-c { font-family: 'IBM Plex Mono', monospace; font-size: 80px;
+                 font-weight: 500; line-height: 1; }
+  .wx-f { color: #f5ece0; }
+  .wx-c { color: #e4f0ea; }
+  .wx-slash { font-size: 52px; font-weight: 400; line-height: 1; color: #5f5d57; }
+  .wx-cond { font-size: 38px; font-weight: 600; letter-spacing: 3px;
+             text-transform: uppercase; color: #8d8a80; }
+  .wx-hilo { font-size: 34px; font-weight: 500; letter-spacing: 4px; color: #5f5d57; }
+
+  .rule { height: 5px; background: #f0b429; margin-top: 30px; }
+  .colhead { display: flex; justify-content: space-between; padding: 20px 0 22px; }
+  .colhead span { font-size: 34px; font-weight: 600; letter-spacing: 9px;
+                  text-transform: uppercase; color: #8d8a80; white-space: nowrap; }
+
+  /* ------- departure groups (one block per travel goal) */
+
+  .groups { display: flex; flex-direction: column; gap: 34px; }
+  .group { background: var(--tint); border-left: 8px solid var(--accent); }
+
+  .group-head { display: grid; grid-template-columns: 1fr 300px;
+                align-items: end; gap: 20px; padding: 34px 30px 26px; }
+  .group-title { font-size: 88px; font-weight: 700; letter-spacing: 1px;
+                 line-height: 1; text-transform: uppercase; }
+  .group-via { font-size: 34px; font-weight: 600; letter-spacing: 3px;
+               text-transform: uppercase; color: #8d8a80; margin-top: 10px; }
+  .group-leave { text-align: right; white-space: nowrap; }
+  .group-leave-label { font-size: 28px; font-weight: 600; letter-spacing: 5px;
+                       text-transform: uppercase; color: #8d8a80; }
+  .group-leave-num { font-family: 'IBM Plex Mono', monospace; font-size: 146px;
+                     font-weight: 500; line-height: 1; color: var(--accent); }
+  .group-leave-num.none { color: #5f5d57; }
+  .group-leave-unit { font-size: 36px; font-weight: 600; color: #8d8a80;
+                      margin-left: 8px; }
+
+  .route-row { display: grid; grid-template-columns: 190px 1fr; align-items: center;
+               gap: 20px; padding: 24px 30px; border-top: 1px solid var(--line); }
+  .route-label { font-family: 'IBM Plex Mono', monospace; font-size: 42px;
+                 font-weight: 600; color: var(--accent); }
+  .route-times { font-family: 'IBM Plex Mono', monospace; font-size: 48px;
+                 font-weight: 400; color: #d8d4cb; letter-spacing: 1px;
+                 white-space: nowrap; overflow: hidden; }
+  .route-times.empty { color: #5f5d57; font-size: 36px; text-overflow: ellipsis; }
+  /* a departure you can no longer walk to in time */
+  .route-times .missed { opacity: .32; }
+  .route-times .sep { color: #5f5d57; }
+
+  /* ------- footer stack: 12-hour outlook, bins, note */
+
+  /* The footer stack hugs the bottom edge and the outlook keeps a constant
+     height, so slack from a short departure list collects in one gap above
+     it rather than stretching the rain bars into a mostly-empty box. */
+  .foot { display: flex; flex-direction: column; gap: 24px; flex: 1;
+          margin-top: 34px; justify-content: flex-end; }
+
+  .fc { background: rgba(255,255,255,.035); padding: 24px 24px 20px;
+        flex: none; display: flex; flex-direction: column; }
+  .fc-head { display: flex; justify-content: space-between; align-items: baseline;
+             margin-bottom: 16px; }
+  .fc-head-l { display: flex; align-items: baseline; gap: 16px; }
+  .fc-title { font-size: 30px; font-weight: 600; letter-spacing: 7px;
+              text-transform: uppercase; color: #8d8a80; white-space: nowrap; }
+  .fc-units { font-size: 26px; font-weight: 600; letter-spacing: 3px;
+              text-transform: uppercase; color: #8d8a80; white-space: nowrap; }
+  .fc-rain { font-size: 28px; font-weight: 600; letter-spacing: 4px;
+             text-transform: uppercase; color: #6fb7e8; white-space: nowrap; }
+  .fc-grid { display: grid; gap: 7px; height: 300px; }
+  .fc-col { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .fc-tf, .fc-tc { font-family: 'IBM Plex Mono', monospace; font-size: 26px;
+                   font-weight: 500; line-height: 1.15; }
+  .fc-tf { color: #f5ece0; }
+  .fc-tc { color: #e4f0ea; }
+  .fc-bar-wrap { flex: 1; width: 100%; display: flex; align-items: flex-end; }
+  .fc-bar { width: 100%; background: #6fb7e8; }
+  .fc-pop { font-family: 'IBM Plex Mono', monospace; font-size: 26px; color: #6fb7e8; }
+  .fc-hr { font-size: 26px; font-weight: 600; letter-spacing: 1px;
+           text-transform: uppercase; color: #5f5d57; }
+
+  .bins { display: flex; justify-content: space-between; align-items: center;
+          border-top: 1px solid rgba(255,255,255,.12); padding-top: 20px; }
+  .bins-line { font-size: 34px; font-weight: 700; letter-spacing: 3px;
+               text-transform: uppercase; color: #d8d4cb; white-space: nowrap; }
+  .bins-kind { font-size: 32px; font-weight: 600; letter-spacing: 3px;
+               text-transform: uppercase; color: #5f5d57; white-space: nowrap; }
+
+  .note { display: flex; gap: 18px; align-items: center; }
+  .note-tag { font-family: 'IBM Plex Mono', monospace; font-size: 26px;
+              font-weight: 600; letter-spacing: 2px; color: #f0b429;
+              border: 2px solid #f0b429; padding: 6px 12px; white-space: nowrap; }
+  .note-text { font-size: 34px; font-weight: 500; letter-spacing: 1px;
+               color: #a9a69d; line-height: 1.25; text-wrap: pretty; }
+  .note.stale .note-tag { color: #d97b5a; border-color: #d97b5a; }
+  .note.stale .note-text { color: #d97b5a; }
+
+  /* -------------------------------------------------------- night state */
+
+  #night {
+    background: #050605; color: #4a473f;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 52px;
+  }
+  .n-clock { font-family: 'IBM Plex Mono', monospace; font-weight: 200;
+             font-size: 330px; line-height: 1; letter-spacing: -14px; color: #6b675d; }
+  .n-date { font-size: 52px; font-weight: 600; letter-spacing: 10px;
+            text-transform: uppercase; margin-top: 16px; white-space: nowrap; }
+  .n-rule { height: 2px; background: #1c1d1a; margin: 60px 0 44px; }
+  .n-foot { display: flex; justify-content: space-between; align-items: baseline; }
+  .n-foot span { font-size: 38px; font-weight: 600; letter-spacing: 5px;
+                 text-transform: uppercase; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <!-- ============================================================ day -->
+  <section class="panel" id="day">
+    <div class="head">
+      <div>
+        <div class="clock" id="clock">–:––</div>
+        <div class="dateline" id="dateline"></div>
+      </div>
+      <div class="wx" id="wx">
+        <div class="wx-temps">
+          <span class="wx-f" id="wxF"></span>
+          <span class="wx-slash">/</span>
+          <span class="wx-c" id="wxC"></span>
+        </div>
+        <div class="wx-cond" id="wxCond"></div>
+        <div class="wx-hilo" id="wxHiLo"></div>
+      </div>
+    </div>
+
+    <div class="rule"></div>
+    <div class="colhead"><span>Departures</span><span>Leave in</span></div>
+
+    <div class="groups" id="groups"></div>
+
+    <div class="foot" id="foot">
+      <div class="fc" id="fc">
+        <div class="fc-head">
+          <div class="fc-head-l">
+            <div class="fc-title" id="fcTitle">Next 12 hours</div>
+            <div class="fc-units">°F / °C</div>
+          </div>
+          <div class="fc-rain">Rain chance</div>
+        </div>
+        <div class="fc-grid" id="fcGrid"></div>
+      </div>
+
+      <div class="bins" id="bins">
+        <div class="bins-line" id="binsLine"></div>
+        <div class="bins-kind" id="binsKind"></div>
+      </div>
+
+      <div class="note" id="note">
+        <div class="note-tag" id="noteTag">NOTE</div>
+        <div class="note-text" id="noteText"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================================== night -->
+  <section class="panel" id="night" hidden>
+    <div class="n-clock" id="nClock">–:––</div>
+    <div class="n-date" id="nDate"></div>
+    <div class="n-rule"></div>
+    <div class="n-foot">
+      <span id="nFirst"></span>
+      <span id="nWx"></span>
+    </div>
+  </section>
+
+</div>
+
+<script>
+"use strict";
+
+// panel.html and panel_design.html differ only in this flag: the design
+// copy falls back to demo data when no server is reachable.
+const ALLOW_DEMO = false;
+
+const W = 1080, H = 1920;
+const ACCENTS = ["#8fd4c1", "#f0b429", "#6fb7e8", "#d99a9a"];
+
+let data = null;
+let clockOffset = 0;        // serverNow - clientNow (s)
+let tz = "America/Los_Angeles";
+let lastGood = 0;           // client epoch (s) of the last successful fetch
+
+// ---------------------------------------------------------------- time
+
+function now() { return Date.now() / 1000 + clockOffset; }
+
+function clockParts(epoch, opts) {
+  return new Date(epoch * 1000).toLocaleTimeString("en-US",
+      Object.assign({ hour12: true, timeZone: tz }, opts));
+}
+// 7:34
+function fmtTime(epoch) {
+  return clockParts(epoch, { hour: "numeric", minute: "2-digit" })
+      .replace(/\s*[AP]M$/i, "");
+}
+// 6:12a
+function fmtTimeMer(epoch) {
+  return clockParts(epoch, { hour: "numeric", minute: "2-digit" })
+      .replace(/\s*AM$/i, "a").replace(/\s*PM$/i, "p");
+}
+// 3p
+function fmtHour(epoch) {
+  return clockParts(epoch, { hour: "numeric" })
+      .replace(/\s*AM$/i, "a").replace(/\s*PM$/i, "p");
+}
+function fmtDateLine(epoch) {
+  const d = new Date(epoch * 1000);
+  return d.toLocaleDateString("en-US", { weekday: "long", timeZone: tz })
+       + " · "
+       + d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: tz });
+}
+// minutes since local midnight, in the board's timezone
+function localMinutes(epoch) {
+  const s = new Date(epoch * 1000).toLocaleTimeString("en-GB",
+      { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz });
+  const [h, m] = s.split(":").map(Number);
+  return h * 60 + m;
+}
+function parseHM(s) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || "").trim());
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+// ---------------------------------------------------------------- util
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function rgba(hex, a) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ""));
+  if (!m) return `rgba(255,255,255,${a})`;
+  const n = parseInt(m[1], 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+}
+// Feed errors arrive as raw Python exception text. Nobody reads a stack
+// trace from across the room, so say the one thing that's actionable.
+function shortError(msg) {
+  const m = String(msg || "");
+  if (/\b401\b|valid token|unauthoriz/i.test(m)) return "feed needs an API token";
+  if (/\b403\b|forbidden/i.test(m)) return "feed rejected the API token";
+  if (/\b404\b/.test(m)) return "feed URL not found";
+  if (/\b429\b|rate limit/i.test(m)) return "feed rate-limited";
+  if (/\b5\d\d\b/.test(m)) return "feed server error";
+  if (/timed out|timeout/i.test(m)) return "feed timed out";
+  if (/not loaded yet/i.test(m)) return "loading schedule…";
+  if (/ambiguous|candidates/i.test(m)) return "stop is ambiguous — see /";
+  return m.length > 44 ? m.slice(0, 43) + "…" : m;
+}
+function setText(id, s) { document.getElementById(id).textContent = s; }
+function show(id, on) { document.getElementById(id).hidden = !on; }
+
+// ---------------------------------------------------------------- model
+
+// Panel groups come from config.json; without them, fall back to the first
+// few boards of the default tab, one group each.
+function panelGroups() {
+  const p = data.panel || {};
+  if (p.groups && p.groups.length) return p.groups;
+  return data.boards.filter(b => b.tab === data.default_tab).slice(0, 3)
+      .map((b, i) => ({
+        title: b.title,
+        accent: b.route_color || ACCENTS[i % ACCENTS.length],
+        boards: [{ board: b.title, label: b.title }],
+      }));
+}
+
+// One group = one travel goal. Its hero number is the soonest departure
+// across its boards that you can still walk to; each board contributes a
+// row of upcoming times.
+function groupModel(g, t) {
+  const nTimes = (data.panel || {}).times_shown || 3;
+  const rows = [];
+  let best = null;
+
+  for (const spec of g.boards || []) {
+    const b = data.boards.find(x => x.title === spec.board);
+    const label = spec.label || spec.board;
+    if (!b) { rows.push({ label, html: "not configured", empty: true }); continue; }
+    if (b.error) { rows.push({ label, html: esc(shortError(b.error)), empty: true }); continue; }
+
+    const walk = b.walk_minutes;
+    const deps = (b.departures || [])
+        .filter(d => !d.cancelled && d.time > t - 30)
+        .slice(0, nTimes);
+    rows.push({
+      label,
+      // times you can't reach in time are dimmed rather than dropped — the
+      // bus is still coming, you just aren't on it
+      html: deps.length
+        ? deps.map(d => `<span class="${(d.time - t) / 60 >= walk ? "" : "missed"}">${esc(fmtTime(d.time))}</span>`)
+              .join('<span class="sep">  ·  </span>')
+        : "no departures",
+      empty: !deps.length,
+    });
+
+    const catchable = deps.find(d => (d.time - t) / 60 >= walk);
+    if (catchable) {
+      const leave = Math.max(0, Math.floor((catchable.time - t) / 60 - walk));
+      if (!best || leave < best.leave) {
+        best = { leave, via: spec.via || b.title, arrive: fmtTime(catchable.time) };
+      }
+    }
+  }
+
+  return {
+    title: g.title,
+    accent: g.accent || ACCENTS[0],
+    via: best ? `${best.via} · ${best.arrive}` : "nothing catchable",
+    leave: best ? String(best.leave) : "—",
+    hasLeave: !!best,
+    rows,
+  };
+}
+
+// earliest upcoming departure across every board the panel shows
+function firstBus(t) {
+  let soonest = null;
+  for (const g of panelGroups()) {
+    for (const spec of g.boards || []) {
+      const b = data.boards.find(x => x.title === spec.board);
+      if (!b) continue;
+      for (const d of b.departures || []) {
+        if (d.cancelled || d.time <= t) continue;
+        if (soonest === null || d.time < soonest) soonest = d.time;
+      }
+    }
+  }
+  return soonest;
+}
+
+function binsModel(t) {
+  const h = data.house || {};
+  if (!h.trash_day) return null;
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
+                "Friday", "Saturday"];
+  const target = days.indexOf(h.trash_day);
+  const today = days.indexOf(
+      new Date(t * 1000).toLocaleDateString("en-US", { weekday: "long", timeZone: tz }));
+  if (target < 0 || today < 0) return null;
+  const until = (target - today + 7) % 7;
+  const line = until === 0 ? `Bins out today — ${h.trash_day}`
+             : until === 1 ? `Bins out tonight — ${h.trash_day} pickup`
+             : `${h.trash_day} pickup · ${until} days`;
+  return { line, kind: h.trash_kinds || "" };
+}
+
+// ---------------------------------------------------------------- render
+
+function renderDay(t, wx) {
+  setText("clock", fmtTime(t));
+  setText("dateline", fmtDateLine(t));
+
+  // --- weather header
+  const hasWx = !!(wx && wx.temp_f !== null && wx.temp_f !== undefined);
+  show("wx", hasWx);
+  if (hasWx) {
+    setText("wxF", wx.temp_f + "°F");
+    setText("wxC", wx.temp_c + "°C");
+    setText("wxCond", wx.cond || "");
+    setText("wxHiLo", (wx.hi_f !== null && wx.lo_f !== null)
+        ? `H ${wx.hi_f} · L ${wx.lo_f}` : "");
+  }
+
+  // --- departure groups
+  document.getElementById("groups").innerHTML = panelGroups().map(g => {
+    const m = groupModel(g, t);
+    const rows = m.rows.map(r => `
+      <div class="route-row">
+        <div class="route-label">${esc(r.label)}</div>
+        <div class="route-times${r.empty ? " empty" : ""}">${r.html}</div>
+      </div>`).join("");
+    return `
+      <div class="group" style="--accent:${esc(m.accent)};--tint:${rgba(m.accent, .08)};--line:${rgba(m.accent, .21)}">
+        <div class="group-head">
+          <div>
+            <div class="group-title">${esc(m.title)}</div>
+            <div class="group-via">${esc(m.via)}</div>
+          </div>
+          <div class="group-leave">
+            <div class="group-leave-label">Leave in</div>
+            <div>
+              <span class="group-leave-num${m.hasLeave ? "" : " none"}">${esc(m.leave)}</span>
+              <span class="group-leave-unit">min</span>
+            </div>
+          </div>
+        </div>
+        ${rows}
+      </div>`;
+  }).join("");
+
+  // --- 12-hour outlook
+  const hours = (wx && wx.hourly) || [];
+  show("fc", hours.length > 0);
+  if (hours.length) {
+    setText("fcTitle", `Next ${hours.length} hours`);
+    const grid = document.getElementById("fcGrid");
+    grid.style.gridTemplateColumns = `repeat(${hours.length}, 1fr)`;
+    grid.innerHTML = hours.map(h => `
+      <div class="fc-col">
+        <div class="fc-tf">${h.temp_f}°</div>
+        <div class="fc-tc">${h.temp_c}°</div>
+        <div class="fc-bar-wrap"><div class="fc-bar" style="height:${Math.round(8 + (h.pop / 100) * 92)}%"></div></div>
+        <div class="fc-pop">${h.pop}%</div>
+        <div class="fc-hr">${esc(fmtHour(h.time))}</div>
+      </div>`).join("");
+  }
+
+  // --- bins
+  const bins = binsModel(t);
+  show("bins", !!bins);
+  if (bins) { setText("binsLine", bins.line); setText("binsKind", bins.kind); }
+
+  // --- note; a stale feed takes the slot over, since it's the thing you
+  //     actually need to know when the numbers stop moving
+  const stale = lastGood && (Date.now() / 1000 - lastGood) > 120;
+  const note = (data.house || {}).note || "";
+  const noteEl = document.getElementById("note");
+  noteEl.classList.toggle("stale", !!stale);
+  show("note", !!(stale || note));
+  setText("noteTag", stale ? "STALE" : "NOTE");
+  setText("noteText", stale
+      ? "Live data unavailable — times below are the last ones received."
+      : note);
+}
+
+function renderNight(t, wx) {
+  setText("nClock", fmtTime(t));
+  setText("nDate", fmtDateLine(t));
+  const fb = firstBus(t);
+  setText("nFirst", fb ? `First bus ${fmtTimeMer(fb)}` : "No buses scheduled");
+  const bits = [];
+  if (wx && wx.temp_f !== null && wx.temp_f !== undefined) bits.push(wx.temp_f + "°");
+  if (wx && wx.rain_pct !== null && wx.rain_pct !== undefined) bits.push(`Rain ${wx.rain_pct}%`);
+  setText("nWx", bits.join(" · "));
+}
+
+function isNight(t) {
+  const p = data.panel || {};
+  if (p.night_start === null) return false;           // explicitly disabled
+  const start = parseHM(p.night_start || "22:00");
+  const end = parseHM(p.night_end || "06:00");
+  if (start === null || end === null) return false;
+  const m = localMinutes(t);
+  return start < end ? (m >= start && m < end) : (m >= start || m < end);
+}
+
+function render() {
+  if (!data || !data.boards) return;
+  const t = now();
+  const wx = data.weather;
+  const night = isNight(t);
+
+  show("day", !night);
+  show("night", night);
+  document.body.style.background = night ? "#050605" : "#0c0d0c";
+  if (night) renderNight(t, wx); else renderDay(t, wx);
+}
+
+// ---------------------------------------------------------------- fit
+
+function fit() {
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  const stage = document.getElementById("stage");
+  stage.style.transform = `scale(${s})`;
+  stage.style.left = Math.round((innerWidth - W * s) / 2) + "px";
+  stage.style.top = Math.round((innerHeight - H * s) / 2) + "px";
+}
+
+// ---------------------------------------------------------------- data
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/board");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    data = await r.json();
+    clockOffset = data.now - Date.now() / 1000;
+    tz = data.timezone;
+    lastGood = Date.now() / 1000;
+  } catch (e) {
+    if (!data && ALLOW_DEMO) {      // design preview with no server behind it
+      data = mockData();
+      clockOffset = 0;
+      tz = data.timezone;
+    }
+  }
+  render();
+}
+
+function mockData() {
+  const t = Date.now() / 1000;
+  const dep = (min, hs) => ({ sched: t + min * 60, time: t + min * 60,
+                              headsign: hs || "", realtime: true, delay: 0,
+                              cancelled: false });
+  const srcS = { rt_age: 8, rt_error: null, static_error: null, poll_seconds: 20 };
+  const pops = [10, 15, 20, 45, 60, 35, 25, 15, 10, 5, 5, 10];
+  const tempsF = [64, 66, 67, 66, 63, 60, 58, 57, 56, 55, 54, 54];
+  return {
+    __mock: true, now: t, timezone: "America/Los_Angeles", default_tab: "work",
+    sources: { lbnl: srcS, actransit: srcS },
+    weather: {
+      temp_f: 64, temp_c: 18, cond: "Partly cloudy", hi_f: 71, lo_f: 55,
+      sunset: t + 4 * 3600, rain_pct: 10, age: 120, error: null,
+      hourly: tempsF.map((tf, i) => ({
+        time: t + (i + 1) * 3600, temp_f: tf,
+        temp_c: Math.round((tf - 32) * 5 / 9), pop: pops[i] })),
+    },
+    house: { trash_day: "Wednesday", trash_kinds: "Compost + recycling",
+             note: "52 detour at Shattuck through Sep 2 — board at Oxford & Center." },
+    panel: {
+      night_start: "22:00", night_end: "06:00", times_shown: 3,
+      groups: [
+        { title: "LBL", accent: "#8fd4c1",
+          boards: [{ board: "Blue Uphill", label: "BLUE", via: "Blue Line" }] },
+        { title: "Campus", accent: "#f0b429",
+          boards: [{ board: "52 to campus", label: "52", via: "Bus 52" },
+                   { board: "F Transbay", label: "F", via: "Bus F" }] },
+      ],
+    },
+    boards: [
+      { title: "Blue Uphill", tab: "work", source: "lbnl", stop: "Oxford At University",
+        walk_minutes: 10, route_color: "#2F75B5", alerts: [], error: null,
+        departures: [dep(16), dep(31), dep(46)] },
+      { title: "52 to campus", tab: "work", source: "actransit",
+        stop: "Oxford St & University Av", walk_minutes: 10, route_color: "#e87ba4",
+        alerts: [], error: null, departures: [dep(19, "U.C. Campus"), dep(34, "U.C. Campus"), dep(54, "U.C. Campus")] },
+      { title: "F Transbay", tab: "work", source: "actransit",
+        stop: "Hearst Av & Walnut St", walk_minutes: 8, route_color: "#d95926",
+        alerts: [], error: null, departures: [dep(23, "U.C. Campus"), dep(38, "U.C. Campus"), dep(53, "U.C. Campus")] },
+    ],
+  };
+}
+
+addEventListener("resize", fit);
+fit();
+refresh();
+setInterval(refresh, 15000);   // re-fetch from server
+setInterval(render, 1000);     // tick countdowns locally
+</script>
+</body>
+</html>

@@ -19,11 +19,19 @@ kiosk can pin one with `http://localhost:8146/?tab=work` or `?tab=sf`
 
 | file | purpose |
 |---|---|
-| `shuttle_dash.py` | the whole backend: fetches feeds, merges schedule + realtime, serves the page |
-| `index.html` | the dashboard UI (one card per board) |
-| `config.json` | feed sources, boards, walk times, port |
+| `shuttle_dash.py` | the whole backend: fetches feeds, merges schedule + realtime, serves the pages |
+| `index.html` | the dashboard UI (one card per board), served at `/` |
+| `panel.html` | the 1080 × 1920 portrait wall panel, served at `/panel` |
+| `config.json` | feed sources, boards, walk times, weather, panel groups, port |
 
-Keep the three files in one folder.
+Keep the files in one folder. `index_design.html` and `panel_design.html` are
+copies used for design previews — they fall back to demo data when no server
+is reachable. `panel_design.html` differs from `panel.html` by exactly one
+line, so regenerate it after editing the panel:
+
+```bash
+sed 's/^const ALLOW_DEMO = false;$/const ALLOW_DEMO = true;/' panel.html > panel_design.html
+```
 
 ## Setup
 
@@ -41,7 +49,8 @@ cp config.example.json config.json
 python3 shuttle_dash.py
 ```
 
-Then open **http://localhost:8146**.
+Then open **http://localhost:8146** for the tabbed dashboard, or
+**http://localhost:8146/panel** for the portrait wall panel.
 
 BART uses its own real-time **ETD API** (`type: "bart_etd"` in config) —
 the same per-station departures third-party apps use. Each estimate
@@ -101,8 +110,53 @@ wrong match, `--find-stops` gives you the codes to pin.
 - If a realtime feed stops responding, its cards fall back to the schedule
   and show a stale warning — the board never goes blank.
 
+## Wall panel (`/panel`)
+
+A second view for a portrait screen on the wall — authored at exactly
+1080 × 1920 and scaled to fit whatever it's opened on, so it letterboxes
+rather than reflowing. It answers one question from across the room: *how
+long until I have to walk out the door?*
+
+- **Groups** — one block per travel goal, not per bus. Each block's big
+  number is the soonest departure across *all* its routes that you can
+  still walk to, minus that board's walk time; the rows beneath list the
+  next few arrival times per route. Times you can no longer reach are
+  dimmed (same idea as the dashboard's "too late" strikethrough).
+- **Header** — clock, date, and current conditions in °F / °C with today's
+  high and low.
+- **Next 12 hours** — temperature in both units and rain chance per hour,
+  bar height proportional to probability.
+- **Footer** — bin day, and a standing note you set in config.
+- **Night state** — between `night_start` and `night_end` the panel drops
+  to a dim clock, the date, the first bus, and the temperature. Set
+  `"night_start": null` to disable it.
+- **Degradation** — if the weather fetch fails the header and outlook
+  hide themselves and departures take the space; if `/api/board` stops
+  responding for two minutes the NOTE slot turns into a stale warning so
+  a frozen clock can't be mistaken for live times.
+
+Kiosk it the same way as the dashboard, pointed at `/panel`:
+
+```
+chromium-browser --kiosk --noerrdialogs --disable-session-crashed-bubble http://localhost:8146/panel
+```
+
 ## Config
 
+- `weather` — `lat` / `lon` for [Open-Meteo](https://open-meteo.com)
+  (no API key, no signup). `poll_seconds` (900) and `hours_shown` (12)
+  are optional. **Delete this block to drop weather from the panel** —
+  everything else keeps working.
+- `house` — `trash_day` (a weekday name), `trash_kinds`, and `note`, the
+  standing line at the bottom of the panel. Omit any of them to hide that
+  row.
+- `panel` — `groups` is a list of `{title, accent, boards}`, where each
+  entry in `boards` is `{board, label, via}`: `board` matches a board's
+  `title`, `label` is the short route badge ("BLUE", "52"), and `via`
+  names the route in the group's subtitle. Also `night_start` /
+  `night_end` ("22:00" / "06:00") and `times_shown` (3). Without a
+  `panel` block the panel falls back to one group per board on the
+  default tab.
 - `sources` — each has a GTFS static URL and a GTFS-realtime (trip updates)
   URL (empty string = schedule-only). `{token}` in a URL is replaced with
   the source's `token` value.
@@ -130,6 +184,11 @@ python3 shuttle_dash.py --offline DIR      # DIR holds <source>_gtfs.zip + <sour
 python3 shuttle_dash.py --now "2026-08-04 08:00"
 python3 shuttle_dash.py --port 9000
 ```
+
+In `--offline` mode the weather comes from `DIR/weather.json` (a saved
+Open-Meteo response) if that file exists, and is skipped otherwise. To
+check the panel's layout with no backend at all, open `panel_design.html`
+straight from disk — it renders against built-in demo data.
 
 ## Raspberry Pi notes
 
