@@ -107,6 +107,7 @@
   .early { color: #3987e5; }
 
   .card-alert { color: var(--warning); font-size: clamp(11px, 2vmin, 14px); }
+  .card-alert.severe { color: #f0724f; font-weight: 600; }
   .card-error { color: var(--warning); font-size: clamp(12px, 2.2vmin, 16px);
                 margin: auto 0; text-align: center; }
 
@@ -175,11 +176,37 @@ function resolveTab() {
 }
 
 function now() { return Date.now() / 1000 + clockOffset; }
+
+// Intl formatters are expensive to construct and this page formats one per
+// departure per tick, so build each once and reuse. Keyed by locale + options
+// + tz, so a timezone change from the server just makes new ones.
+const fmtCache = new Map();
+function dtf(locale, opts) {
+  const key = locale + "|" + tz + "|" + JSON.stringify(opts);
+  let f = fmtCache.get(key);
+  if (!f) {
+    f = new Intl.DateTimeFormat(locale, Object.assign({ timeZone: tz }, opts));
+    fmtCache.set(key, f);
+  }
+  return f;
+}
+
 function fmtTime(epoch) {
-  return new Date(epoch * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZone: tz });
+  return dtf([], { hour: "numeric", minute: "2-digit" }).format(epoch * 1000);
 }
 function dayOf(epoch) {
-  return new Date(epoch * 1000).toLocaleDateString("en-CA", { timeZone: tz });
+  return dtf("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" })
+      .format(epoch * 1000);
+}
+
+// render() runs once a second but the cards rarely change that often, so make
+// the DOM writes idempotent: build the markup, compare, and only touch the
+// document when it differs. A no-op tick then costs no layout or paint.
+const lastHTML = new Map();
+function setHTML(id, html) {
+  if (lastHTML.get(id) === html) return;
+  lastHTML.set(id, html);
+  document.getElementById(id).innerHTML = html;
 }
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -187,8 +214,10 @@ function esc(s) {
 }
 function walkFor(b) {
   if (b.title in walkOverride) return walkOverride[b.title];
+  // localStorage.getItem is a synchronous call and this runs once per board
+  // per tick; nothing outside this page writes these keys, so cache the read.
   const saved = parseInt(localStorage.getItem("walk:" + b.title) || "", 10);
-  return Number.isFinite(saved) ? saved : b.walk_minutes;
+  return (walkOverride[b.title] = Number.isFinite(saved) ? saved : b.walk_minutes);
 }
 
 async function refresh() {
@@ -268,40 +297,65 @@ function cardHTML(b, t) {
       </div>`;
   }).join("");
 
-  const alertsHTML = (b.alerts && b.alerts.length)
-    ? `<div class="card-alert">⚠︎ ${esc(b.alerts.join("  ·  "))}</div>` : "";
+  // one line per feed alert; the description (when the agency supplies one)
+  // rides along as a tooltip rather than burying the card
+  const alertsHTML = (b.alerts || []).map(a => {
+    const tip = a.desc ? ` title="${esc(a.desc)}"` : "";
+    return `<div class="card-alert${a.rank >= 3 ? " severe" : ""}"${tip}>⚠︎ ${esc(a.text)}</div>`;
+  }).join("");
 
-  const s = data.sources[b.source] || {};
-  const age = s.rt_age === null || s.rt_age === undefined ? null : s.rt_age + (t - data.now);
-  const stale = age !== null && age > Math.max(120, (s.poll_seconds || 20) * 2.5);
-  const fresh = age === null
-    ? (s.rt_error ? "live data unavailable" : "no live data")
-    : stale ? "⚠︎ stale — schedule only" : "live " + (age < 5 ? "now" : Math.round(age) + "s ago");
-
+  // The freshness counter is filled in by tickFreshness() rather than being
+  // baked in here — see the note there.
   const foot = `<div class="card-foot">
       <span class="walk-ctl">
         <button data-walk="-1" data-board="${esc(b.title)}">−</button>
         walk <b style="color:var(--ink-2)">${walk}</b> min
         <button data-walk="1" data-board="${esc(b.title)}">+</button>
       </span>
-      <span class="freshness${stale ? " stale" : ""}">${fresh}</span>
+      <span class="freshness" data-fresh="${esc(b.title)}"></span>
     </div>`;
 
   return head + alertsHTML + heroHTML + `<div class="rows">${rowsHTML}</div>` + foot;
+}
+
+function freshnessFor(b, t) {
+  const s = data.sources[b.source] || {};
+  const age = s.rt_age === null || s.rt_age === undefined ? null : s.rt_age + (t - data.now);
+  const stale = age !== null && age > Math.max(120, (s.poll_seconds || 20) * 2.5);
+  const text = age === null
+    ? (s.rt_error ? "live data unavailable" : "no live data")
+    : stale ? "⚠︎ stale — schedule only" : "live " + (age < 5 ? "now" : Math.round(age) + "s ago");
+  return { text, stale };
+}
+
+// "live 12s ago" is the one thing on a card that genuinely changes every
+// second. Kept out of cardHTML so the grid rebuild above stays gated on real
+// change; this walks the handful of spans already in the document and writes
+// only where the text actually differs.
+function tickFreshness(t) {
+  for (const el of document.querySelectorAll("[data-fresh]")) {
+    const b = data.boards.find(x => x.title === el.dataset.fresh);
+    if (!b) continue;
+    const f = freshnessFor(b, t);
+    if (el.textContent !== f.text) el.textContent = f.text;
+    el.classList.toggle("stale", f.stale);
+  }
 }
 
 function render() {
   if (!data || !data.boards) return;
   if (activeTab === null) activeTab = resolveTab();
   const t = now();
-  document.getElementById("clock").textContent = new Date(t * 1000)
-      .toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", timeZone: tz });
-  document.getElementById("tabs").innerHTML = tabList().map(tab =>
+  const clock = document.getElementById("clock");
+  const clockTxt = dtf([], { hour: "numeric", minute: "2-digit", second: "2-digit" })
+      .format(t * 1000);
+  if (clock.textContent !== clockTxt) clock.textContent = clockTxt;
+  setHTML("tabs", tabList().map(tab =>
       `<button data-tab="${esc(tab)}" class="${tab === activeTab ? "active" : ""}">${esc(tab.toUpperCase())}</button>`
-    ).join("");
-  const grid = document.getElementById("grid");
-  grid.innerHTML = data.boards.filter(b => b.tab === activeTab)
-      .map(b => `<section class="card">${cardHTML(b, t)}</section>`).join("");
+    ).join(""));
+  setHTML("grid", data.boards.filter(b => b.tab === activeTab)
+      .map(b => `<section class="card">${cardHTML(b, t)}</section>`).join(""));
+  tickFreshness(t);
 }
 
 document.getElementById("tabs").addEventListener("click", e => {

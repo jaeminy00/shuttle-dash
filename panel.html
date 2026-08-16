@@ -14,10 +14,12 @@
   html, body { height: 100%; overflow: hidden; }
   body { background: #0c0d0c; -webkit-font-smoothing: antialiased; }
 
+  /* centred on the viewport; fit() supplies the scale (and rotation, if the
+     screen is landscape) as a single transform about the stage's middle */
   #stage {
-    position: absolute; top: 0; left: 0;
+    position: absolute; top: 50%; left: 50%;
     width: 1080px; height: 1920px;
-    transform-origin: top left;
+    transform-origin: 50% 50%;
   }
 
   .panel { width: 1080px; height: 1920px; box-sizing: border-box;
@@ -131,10 +133,15 @@
   .note-tag { font-family: 'IBM Plex Mono', monospace; font-size: 26px;
               font-weight: 600; letter-spacing: 2px; color: #f0b429;
               border: 2px solid #f0b429; padding: 6px 12px; white-space: nowrap; }
+  /* agency alert text runs long; two lines is all the slot has */
   .note-text { font-size: 34px; font-weight: 500; letter-spacing: 1px;
-               color: #a9a69d; line-height: 1.25; text-wrap: pretty; }
-  .note.stale .note-tag { color: #d97b5a; border-color: #d97b5a; }
-  .note.stale .note-text { color: #d97b5a; }
+               color: #a9a69d; line-height: 1.25; text-wrap: pretty;
+               display: -webkit-box; -webkit-box-orient: vertical;
+               -webkit-line-clamp: 2; overflow: hidden; }
+  .note.stale .note-tag,
+  .note.severe .note-tag { color: #d97b5a; border-color: #d97b5a; }
+  .note.stale .note-text,
+  .note.severe .note-text { color: #d97b5a; }
 
   /* -------------------------------------------------------- night state */
 
@@ -225,6 +232,7 @@ const ALLOW_DEMO = false;
 
 const W = 1080, H = 1920;
 const ACCENTS = ["#8fd4c1", "#f0b429", "#6fb7e8", "#d99a9a"];
+const ALERT_ROTATE_S = 8;   // seconds each alert holds the single note slot
 
 let data = null;
 let clockOffset = 0;        // serverNow - clientNow (s)
@@ -235,9 +243,23 @@ let lastGood = 0;           // client epoch (s) of the last successful fetch
 
 function now() { return Date.now() / 1000 + clockOffset; }
 
+// Intl formatters are expensive to construct and this page formats a few
+// dozen timestamps every tick, so build each one once and reuse it. Keyed by
+// locale + options + tz, so a timezone change from the server just makes new
+// ones rather than needing the cache cleared.
+const fmtCache = new Map();
+function dtf(locale, opts) {
+  const key = locale + "|" + tz + "|" + JSON.stringify(opts);
+  let f = fmtCache.get(key);
+  if (!f) {
+    f = new Intl.DateTimeFormat(locale, Object.assign({ timeZone: tz }, opts));
+    fmtCache.set(key, f);
+  }
+  return f;
+}
+
 function clockParts(epoch, opts) {
-  return new Date(epoch * 1000).toLocaleTimeString("en-US",
-      Object.assign({ hour12: true, timeZone: tz }, opts));
+  return dtf("en-US", Object.assign({ hour12: true }, opts)).format(epoch * 1000);
 }
 // 7:34
 function fmtTime(epoch) {
@@ -255,15 +277,15 @@ function fmtHour(epoch) {
       .replace(/\s*AM$/i, "a").replace(/\s*PM$/i, "p");
 }
 function fmtDateLine(epoch) {
-  const d = new Date(epoch * 1000);
-  return d.toLocaleDateString("en-US", { weekday: "long", timeZone: tz })
+  const ms = epoch * 1000;
+  return dtf("en-US", { weekday: "long" }).format(ms)
        + " · "
-       + d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: tz });
+       + dtf("en-US", { month: "short", day: "numeric" }).format(ms);
 }
 // minutes since local midnight, in the board's timezone
 function localMinutes(epoch) {
-  const s = new Date(epoch * 1000).toLocaleTimeString("en-GB",
-      { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz });
+  const s = dtf("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false })
+      .format(epoch * 1000);
   const [h, m] = s.split(":").map(Number);
   return h * 60 + m;
 }
@@ -298,8 +320,38 @@ function shortError(msg) {
   if (/ambiguous|candidates/i.test(m)) return "stop is ambiguous — see /";
   return m.length > 44 ? m.slice(0, 43) + "…" : m;
 }
-function setText(id, s) { document.getElementById(id).textContent = s; }
-function show(id, on) { document.getElementById(id).hidden = !on; }
+// render() runs once a second, but almost nothing on screen changes that
+// often — the clock shows no seconds, times are absolute, and "leave in" is
+// whole minutes. Every DOM write below is therefore made idempotent: build
+// the value, compare it to what's already there, and only touch the document
+// when it actually differs. A no-op tick then costs no style, layout or
+// paint at all, which is the difference between smooth and sluggish on a
+// low-power kiosk driving a 1080x1920 stage.
+function setText(id, s) {
+  const el = document.getElementById(id);
+  if (el.textContent !== s) el.textContent = s;
+}
+function show(id, on) {
+  const el = document.getElementById(id), want = !on;
+  if (el.hidden !== want) el.hidden = want;
+}
+// innerHTML is the expensive one: it re-parses, re-styles and re-lays-out the
+// whole subtree. Building the string is cheap by comparison, so build it every
+// tick and let the comparison decide whether the DOM hears about it.
+const lastHTML = new Map();
+function setHTML(id, html) {
+  if (lastHTML.get(id) === html) return;
+  lastHTML.set(id, html);
+  document.getElementById(id).innerHTML = html;
+}
+// Inline styles read back normalized ("#050605" -> "rgb(5, 6, 5)"), so
+// compare against what we last wrote rather than against the element.
+const lastStyle = new Map();
+function setStyle(el, prop, value, key) {
+  if (lastStyle.get(key) === value) return;
+  lastStyle.set(key, value);
+  el.style[prop] = value;
+}
 
 // ---------------------------------------------------------------- model
 
@@ -380,14 +432,24 @@ function firstBus(t) {
   return soonest;
 }
 
+// Live service alerts worth this screen's attention. The feeds carry the
+// whole agency, and the server already narrowed them to boards we configured
+// — narrow again to the boards this panel actually displays.
+function panelAlerts() {
+  const shown = new Set();
+  for (const g of panelGroups())
+    for (const spec of g.boards || []) shown.add(spec.board);
+  return (data.alerts || [])
+      .filter(a => (a.boards || []).some(b => shown.has(b)));
+}
+
 function binsModel(t) {
   const h = data.house || {};
   if (!h.trash_day) return null;
   const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
                 "Friday", "Saturday"];
   const target = days.indexOf(h.trash_day);
-  const today = days.indexOf(
-      new Date(t * 1000).toLocaleDateString("en-US", { weekday: "long", timeZone: tz }));
+  const today = days.indexOf(dtf("en-US", { weekday: "long" }).format(t * 1000));
   if (target < 0 || today < 0) return null;
   const until = (target - today + 7) % 7;
   const line = until === 0 ? `Bins out today — ${h.trash_day}`
@@ -414,7 +476,7 @@ function renderDay(t, wx) {
   }
 
   // --- departure groups
-  document.getElementById("groups").innerHTML = panelGroups().map(g => {
+  setHTML("groups", panelGroups().map(g => {
     const m = groupModel(g, t);
     const rows = m.rows.map(r => `
       <div class="route-row">
@@ -438,23 +500,24 @@ function renderDay(t, wx) {
         </div>
         ${rows}
       </div>`;
-  }).join("");
+  }).join(""));
 
-  // --- 12-hour outlook
+  // --- 12-hour outlook (only ever changes when the weather poll lands, but
+  //     it is rebuilt here so the setHTML compare is the single gate)
   const hours = (wx && wx.hourly) || [];
   show("fc", hours.length > 0);
   if (hours.length) {
     setText("fcTitle", `Next ${hours.length} hours`);
     const grid = document.getElementById("fcGrid");
-    grid.style.gridTemplateColumns = `repeat(${hours.length}, 1fr)`;
-    grid.innerHTML = hours.map(h => `
+    setStyle(grid, "gridTemplateColumns", `repeat(${hours.length}, 1fr)`, "fcCols");
+    setHTML("fcGrid", hours.map(h => `
       <div class="fc-col">
         <div class="fc-tf">${h.temp_f}°</div>
         <div class="fc-tc">${h.temp_c}°</div>
         <div class="fc-bar-wrap"><div class="fc-bar" style="height:${Math.round(8 + (h.pop / 100) * 92)}%"></div></div>
         <div class="fc-pop">${h.pop}%</div>
         <div class="fc-hr">${esc(fmtHour(h.time))}</div>
-      </div>`).join("");
+      </div>`).join(""));
   }
 
   // --- bins
@@ -462,17 +525,30 @@ function renderDay(t, wx) {
   show("bins", !!bins);
   if (bins) { setText("binsLine", bins.line); setText("binsKind", bins.kind); }
 
-  // --- note; a stale feed takes the slot over, since it's the thing you
-  //     actually need to know when the numbers stop moving
+  // --- note slot, in priority order: a stale feed first (nothing else on
+  //     screen can be trusted), then live service alerts, then the standing
+  //     house note
   const stale = lastGood && (Date.now() / 1000 - lastGood) > 120;
-  const note = (data.house || {}).note || "";
+  const alerts = panelAlerts();
+  let tag = "NOTE", text = (data.house || {}).note || "", severe = false;
+  if (stale) {
+    tag = "STALE";
+    text = "Live data unavailable — times below are the last ones received.";
+  } else if (alerts.length) {
+    // one slot, so several alerts take turns in it
+    const i = Math.floor(t / ALERT_ROTATE_S) % alerts.length;
+    const a = alerts[i];
+    severe = a.rank >= 3;
+    tag = (severe ? "ALERT" : "ADVISORY")
+        + (alerts.length > 1 ? ` ${i + 1}/${alerts.length}` : "");
+    text = a.text;
+  }
   const noteEl = document.getElementById("note");
   noteEl.classList.toggle("stale", !!stale);
-  show("note", !!(stale || note));
-  setText("noteTag", stale ? "STALE" : "NOTE");
-  setText("noteText", stale
-      ? "Live data unavailable — times below are the last ones received."
-      : note);
+  noteEl.classList.toggle("severe", severe);
+  show("note", !!text);
+  setText("noteTag", tag);
+  setText("noteText", text);
 }
 
 function renderNight(t, wx) {
@@ -504,18 +580,30 @@ function render() {
 
   show("day", !night);
   show("night", night);
-  document.body.style.background = night ? "#050605" : "#0c0d0c";
+  setStyle(document.body, "background", night ? "#050605" : "#0c0d0c", "bodyBg");
   if (night) renderNight(t, wx); else renderDay(t, wx);
 }
 
 // ---------------------------------------------------------------- fit
 
+// The panel is authored portrait. On a landscape screen, rotate it here
+// rather than at the display level: fit() already applies one composited
+// transform, so folding a rotation into the same matrix is free, whereas
+// rotating the display can fall back to a per-frame software rotate on a
+// weak GPU (VC4 has no general 90° hardware rotate). Kiosk URL takes
+// ?rotate=90 or ?rotate=270; without it nothing changes.
+const ROTATE = (() => {
+  const r = Number(new URLSearchParams(location.search).get("rotate"));
+  return [90, 180, 270].includes(r) ? r : 0;
+})();
+
 function fit() {
-  const s = Math.min(innerWidth / W, innerHeight / H);
-  const stage = document.getElementById("stage");
-  stage.style.transform = `scale(${s})`;
-  stage.style.left = Math.round((innerWidth - W * s) / 2) + "px";
-  stage.style.top = Math.round((innerHeight - H * s) / 2) + "px";
+  const quarter = ROTATE % 180 !== 0;   // 90/270 swap which axis bounds what
+  const availW = quarter ? innerHeight : innerWidth;
+  const availH = quarter ? innerWidth : innerHeight;
+  const s = Math.min(availW / W, availH / H);
+  document.getElementById("stage").style.transform =
+      `translate(-50%, -50%) rotate(${ROTATE}deg) scale(${s})`;
 }
 
 // ---------------------------------------------------------------- data
@@ -557,7 +645,12 @@ function mockData() {
         temp_c: Math.round((tf - 32) * 5 / 9), pop: pops[i] })),
     },
     house: { trash_day: "Wednesday", trash_kinds: "Compost + recycling",
-             note: "52 detour at Shattuck through Sep 2 — board at Oxford & Center." },
+             note: "Front-desk package pickup closes at 6." },
+    alerts: [
+      { id: "a1", text: "52 detour at Shattuck — board at Oxford & Center",
+        desc: "", url: "", effect: "DETOUR", severity: "", rank: 2,
+        source: "actransit", boards: ["52 to campus"] },
+    ],
     panel: {
       night_start: "22:00", night_end: "06:00", times_shown: 3,
       groups: [
@@ -574,7 +667,9 @@ function mockData() {
         departures: [dep(16), dep(31), dep(46)] },
       { title: "52 to campus", tab: "work", source: "actransit",
         stop: "Oxford St & University Av", walk_minutes: 10, route_color: "#e87ba4",
-        alerts: [], error: null, departures: [dep(19, "U.C. Campus"), dep(34, "U.C. Campus"), dep(54, "U.C. Campus")] },
+        alerts: [{ id: "a1", text: "52 detour at Shattuck — board at Oxford & Center",
+                   desc: "", url: "", effect: "DETOUR", severity: "", rank: 2 }],
+        error: null, departures: [dep(19, "U.C. Campus"), dep(34, "U.C. Campus"), dep(54, "U.C. Campus")] },
       { title: "F Transbay", tab: "work", source: "actransit",
         stop: "Hearst Av & Walnut St", walk_minutes: 8, route_color: "#d95926",
         alerts: [], error: null, departures: [dep(23, "U.C. Campus"), dep(38, "U.C. Campus"), dep(53, "U.C. Campus")] },

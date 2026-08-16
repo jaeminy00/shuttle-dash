@@ -196,9 +196,16 @@ The layout auto-compacts below ~500 px of height (one row per card,
 tested at 480×320). Rough kiosk recipe:
 
 ```bash
-sudo apt install chromium-browser
+sudo apt install cog          # WPE WebKit kiosk browser — no X, no desktop
 pip install gtfs-realtime-bindings
 ```
+
+**Browser choice matters more than the Pi does.** Cog renders straight to
+DRM/KMS with no X server and no window manager, which on a 1 GB Pi 3B+ is
+the difference between fitting in RAM and swapping to the SD card —
+figure ~150–220 MB against Chromium-plus-a-desktop's 400–700 MB.
+Chromium still works if you prefer it; give it `--kiosk --noerrdialogs
+--disable-session-crashed-bubble` and expect to want a Pi 4.
 
 Autostart the server with systemd — `/etc/systemd/system/shuttle-dash.service`:
 
@@ -218,19 +225,51 @@ User=pi
 WantedBy=multi-user.target
 ```
 
-Then launch the browser in kiosk mode:
+Then launch the browser:
 
 ```
-chromium-browser --kiosk --noerrdialogs --disable-session-crashed-bubble http://localhost:8146
+cog http://localhost:8146/panel
 ```
 
 Disable screen blanking (`raspi-config` → Display → Screen Blanking → off).
 The server binds `0.0.0.0`, so you can also open `http://<pi-address>:8146`
 from any device on your network.
 
-Note: AC Transit's full GTFS is much bigger than the LBNL one — first
-parse may take ~15–30 s on an older Pi. It happens once a day in a
-background thread; the board keeps serving the old schedule meanwhile.
+### A portrait panel on a landscape screen
+
+`/panel` is authored portrait (1080 × 1920). If the physical screen is
+landscape, add `?rotate=90` (or `270`) to the kiosk URL:
+
+```
+cog 'http://localhost:8146/panel?rotate=90'
+```
+
+The page already applies one composited transform to scale itself, so
+folding the rotation into that same matrix is free. On a 1920 × 1080
+screen this lands at **scale 1.0 — a pixel-exact fit** at the authored
+resolution. Prefer this over rotating the display: VC4 has no general 90°
+hardware rotate, so `video=HDMI-A-1:1920x1080@60,rotate=90` on the kernel
+command line can silently fall back to rotating every frame on the CPU.
+Rotate at the display level only if you also need the console and the `/`
+dashboard rotated, and check for stutter if you do.
+
+### Startup
+
+The server binds its socket *before* fetching any feed, and each source
+loads on its own thread — so a kiosk browser starting alongside it always
+gets a page. Boards whose schedule hasn't arrived yet read "loading
+schedule…" and fill in as their source lands; measured cold start to first
+`/api/board` response is ~0.1 s, with all boards populated within ~10 s.
+This matters most with Cog, which has no user to press reload and does not
+retry a failed load on its own.
+
+AC Transit's full GTFS is much bigger than the LBNL one — first parse may
+take ~15–30 s on an older Pi (639k stop-times). That no longer delays
+startup, and the daily refresh happens in a background thread with the old
+schedule still being served.
+
+`--offline` still loads synchronously, so test runs have a fully populated
+app before the first request.
 
 ## How it works (for future tinkering)
 
@@ -247,3 +286,16 @@ background thread; the board keeps serving the old schedule meanwhile.
 - **Stop resolution**: `stop` in config accepts stop_id → stop_code →
   exact name → name fragment; a fragment must be unique *among stops the
   route actually serves*, otherwise the card lists the candidates.
+- **Rendering**: both pages tick once a second, but the DOM writes are
+  idempotent — `setText` / `setHTML` / `setStyle` build the value, compare it
+  to what was last written, and only touch the document when it differs. A
+  second in which nothing visibly changed therefore costs no layout or paint,
+  which is what keeps a low-power kiosk smooth. Measured over 60 ticks with
+  unchanged data, `/panel` does **one** `innerHTML` rebuild (the minute
+  rollover) rather than 120. Keep new per-tick output flowing through those
+  helpers; assigning `innerHTML` directly in a render path puts the cost back.
+  The one genuinely per-second value on `/` is each card's "live 12s ago"
+  counter, which is deliberately written by `tickFreshness()` into spans the
+  card markup leaves empty, so it can update without rebuilding the card.
+  Intl formatters are cached in `dtf()` — constructing them per call was a
+  large share of the tick's CPU.

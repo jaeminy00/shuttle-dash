@@ -14,6 +14,9 @@ Usage:
     python3 shuttle_dash.py --now "2026-08-04 08:00"    # freeze the clock
     python3 shuttle_dash.py --find-stops "hearst"       # search stops in all sources
 
+Serves two views: the tabbed dashboard at /, and the 1080x1920 portrait wall
+panel at /panel (see panel.html).
+
 Dependencies: gtfs-realtime-bindings  (pip install gtfs-realtime-bindings)
 """
 
@@ -29,6 +32,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, date, timedelta
@@ -293,6 +297,106 @@ class StaticGTFS:
         out.sort(key=lambda x: x["sched"])
         return out
 
+# ---------------------------------------------------------------- alerts
+
+# How loudly an alert should be shown. Most feeds leave severity_level unset,
+# so the effect carries the weight in practice.
+SEVERITY_RANK = {"SEVERE": 3, "WARNING": 2, "INFO": 1}
+EFFECT_RANK = {"NO_SERVICE": 3, "SIGNIFICANT_DELAYS": 3,
+               "DETOUR": 2, "REDUCED_SERVICE": 2, "STOP_MOVED": 2,
+               "MODIFIED_SERVICE": 1, "ADDITIONAL_SERVICE": 1}
+
+
+def _translated(container, lang="en"):
+    """Text of a GTFS-rt TranslatedString, preferring English."""
+    best = ""
+    for t in container.translation:
+        if not best:
+            best = t.text
+        if t.language.lower().startswith(lang):
+            return t.text
+    return best
+
+
+def _enum_name(msg, field, enum_type):
+    """Enum field as a name, or "" when the feed omitted it.
+
+    GTFS-realtime is proto2 and these fields carry no explicit default, so an
+    absent `effect` reads back as NO_SERVICE — the most alarming value there
+    is. Only trust the value when the field is actually present.
+    """
+    try:
+        return enum_type.Name(getattr(msg, field)) if msg.HasField(field) else ""
+    except (ValueError, AttributeError):
+        return ""          # field unknown to this version of the bindings
+
+
+def parse_alerts(feed):
+    """GTFS-realtime FeedMessage -> alert dicts (no time/route filtering)."""
+    Alert = gtfs_realtime_pb2.Alert
+    out = []
+    for e in feed.entity:
+        if not e.HasField("alert"):
+            continue
+        a = e.alert
+        header = _translated(a.header_text).strip()
+        desc = _translated(a.description_text).strip()
+        if not (header or desc):
+            continue
+        out.append({
+            "id": e.id or header[:80],
+            "text": header or desc,
+            "desc": desc if desc != header else "",
+            "url": _translated(a.url).strip(),
+            "effect": _enum_name(a, "effect", Alert.Effect),
+            "severity": _enum_name(a, "severity_level", Alert.SeverityLevel),
+            "periods": [(p.start or 0, p.end or 0) for p in a.active_period],
+            # one selector per informed entity; the fields inside a single
+            # selector are ANDed (route R *at* stop S), separate selectors ORed
+            "selectors": [{"route_id": ie.route_id, "stop_id": ie.stop_id,
+                           "trip_id": ie.trip.trip_id}
+                          for ie in a.informed_entity],
+        })
+    return out
+
+
+def alert_active(alert, now):
+    """True when `now` falls in one of the alert's active periods.
+
+    No active_period at all means "active until the feed drops it", which is
+    how most agencies publish; an unbounded start or end is open-ended.
+    """
+    if not alert["periods"]:
+        return True
+    return any((not start or start <= now) and (not end or now <= end)
+               for start, end in alert["periods"])
+
+
+def alert_matches(alert, route_ids=(), stop_ids=(), trip_ids=()):
+    """True when an alert informs about anything this board actually shows."""
+    for s in alert["selectors"]:
+        if s["route_id"] and s["route_id"] not in route_ids:
+            continue
+        if s["stop_id"] and s["stop_id"] not in stop_ids:
+            continue
+        if s["trip_id"] and s["trip_id"] not in trip_ids:
+            continue
+        # every field the selector pinned down matches (or it pinned down
+        # nothing beyond the agency, which makes it feed-wide)
+        return True
+    return not alert["selectors"]
+
+
+def alert_rank(alert):
+    return max(SEVERITY_RANK.get(alert.get("severity", ""), 0),
+               EFFECT_RANK.get(alert.get("effect", ""), 0))
+
+
+def alert_public(alert):
+    """The subset of an alert the front-ends need (drops feed selectors)."""
+    return {k: alert[k] for k in ("id", "text", "desc", "url", "effect",
+                                  "severity")} | {"rank": alert_rank(alert)}
+
 # ---------------------------------------------------------------- realtime
 
 class RealtimeState:
@@ -300,53 +404,77 @@ class RealtimeState:
         self.lock = threading.Lock()
         self.updates = {}        # trip_id -> {stop_id: {"time","delay","skipped"}}
         self.cancelled = set()
-        self.alerts = []
+        self.tu_alerts = []      # alerts riding along in the trip-update feed
+        self.sa_alerts = []      # alerts from a dedicated service-alerts feed
         self.fetched_at = None
         self.error = None
+        self.alerts_fetched_at = None
+        self.alerts_error = None
 
-    def ingest(self, pb_bytes, when):
+    def alerts(self):
+        """Both alert sources merged; caller must hold the lock.
+
+        Agencies that publish a separate service-alerts endpoint often repeat
+        some of it in the trip-update feed, so dedupe on id and text.
+        """
+        merged, seen = [], set()
+        for a in self.sa_alerts + self.tu_alerts:
+            key = (a["id"], a["text"])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(a)
+        return merged
+
+    def ingest(self, pb_bytes, when, alerts_inline=True):
+        """Ingest a trip-update feed.
+
+        `alerts_inline` is False when the source has a dedicated alerts
+        endpoint — then any alerts riding along here are redundant, and
+        letting them stamp alerts_fetched_at would hide a failing alerts feed.
+        """
         feed = gtfs_realtime_pb2.FeedMessage()
         feed.ParseFromString(pb_bytes)
-        updates, cancelled, alerts = {}, set(), []
+        updates, cancelled = {}, set()
         for e in feed.entity:
-            if e.HasField("trip_update"):
-                tu = e.trip_update
-                tid = tu.trip.trip_id
-                if tu.trip.schedule_relationship == tu.trip.CANCELED:
-                    cancelled.add(tid)
-                    continue
-                stu_map = {}
-                last_stop = None
-                for stu in tu.stop_time_update:
-                    skipped = stu.schedule_relationship == stu.SKIPPED
-                    t = None
-                    if stu.HasField("departure") and stu.departure.time:
-                        t = stu.departure.time
-                    elif stu.HasField("arrival") and stu.arrival.time:
-                        t = stu.arrival.time
-                    stu_map[stu.stop_id] = {"time": t, "skipped": skipped}
-                    if not skipped:
-                        last_stop = stu.stop_id
-                if stu_map:
-                    updates[tid] = {"route_id": tu.trip.route_id,
-                                    "stops": stu_map, "last_stop": last_stop}
-            elif e.HasField("alert"):
-                a = e.alert
-                text = ""
-                if a.header_text.translation:
-                    text = a.header_text.translation[0].text
-                if a.description_text.translation:
-                    desc = a.description_text.translation[0].text
-                    if desc and desc != text:
-                        text = f"{text} — {desc}" if text else desc
-                alerts.append({
-                    "text": text,
-                    "routes": {ie.route_id for ie in a.informed_entity if ie.route_id},
-                    "stops": {ie.stop_id for ie in a.informed_entity if ie.stop_id},
-                })
+            if not e.HasField("trip_update"):
+                continue
+            tu = e.trip_update
+            tid = tu.trip.trip_id
+            if tu.trip.schedule_relationship == tu.trip.CANCELED:
+                cancelled.add(tid)
+                continue
+            stu_map = {}
+            last_stop = None
+            for stu in tu.stop_time_update:
+                skipped = stu.schedule_relationship == stu.SKIPPED
+                t = None
+                if stu.HasField("departure") and stu.departure.time:
+                    t = stu.departure.time
+                elif stu.HasField("arrival") and stu.arrival.time:
+                    t = stu.arrival.time
+                stu_map[stu.stop_id] = {"time": t, "skipped": skipped}
+                if not skipped:
+                    last_stop = stu.stop_id
+            if stu_map:
+                updates[tid] = {"route_id": tu.trip.route_id,
+                                "stops": stu_map, "last_stop": last_stop}
+        alerts = parse_alerts(feed) if alerts_inline else None
         with self.lock:
-            self.updates, self.cancelled, self.alerts = updates, cancelled, alerts
+            self.updates, self.cancelled = updates, cancelled
             self.fetched_at, self.error = when, None
+            if alerts is not None:
+                # an empty list is a real answer: the feed says "nothing wrong"
+                self.tu_alerts = alerts
+                self.alerts_fetched_at, self.alerts_error = when, None
+
+    def ingest_alerts(self, pb_bytes, when):
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(pb_bytes)
+        alerts = parse_alerts(feed)
+        with self.lock:
+            self.sa_alerts = alerts
+            self.alerts_fetched_at, self.alerts_error = when, None
 
 # ---------------------------------------------------------------- source
 
@@ -361,8 +489,13 @@ class Source:
         token = scfg.get("token", "")
         self.static_url = scfg["gtfs_static_url"].replace("{token}", token)
         self.rt_url = scfg.get("gtfs_rt_url", "").replace("{token}", token)
+        # Some agencies bundle alerts into the trip-update feed (TripShot);
+        # others publish them at their own endpoint (AC Transit, 511).
+        self.alerts_url = scfg.get("gtfs_alerts_url", "").replace("{token}", token)
         self.boards_cfg = [b for b in cfg["boards"] if b["source"] == name]
         self.poll_seconds = scfg.get("poll_seconds", cfg.get("rt_poll_seconds", 20))
+        self.alerts_poll_seconds = scfg.get(
+            "alerts_poll_seconds", cfg.get("alerts_poll_seconds", 120))
         self.static = None            # StaticGTFS
         self.static_loaded_at = None
         self.static_error = None
@@ -409,11 +542,34 @@ class Source:
                     data = f.read()
             else:
                 data = http_get(self.rt_url, timeout=20)
-            self.rt.ingest(data, now)
+            self.rt.ingest(data, now, alerts_inline=not self.alerts_url)
         except Exception as ex:
             with self.rt.lock:
                 self.rt.error = str(ex)
             print(f"[rt:{self.name}] fetch failed: {ex}", file=sys.stderr)
+
+    def load_alerts(self, now):
+        if not self.alerts_url:
+            return
+        try:
+            if self.args.offline:
+                path = self._offline_path("alerts.pb")
+                if not os.path.exists(path):
+                    return          # optional in offline fixtures
+                with open(path, "rb") as f:
+                    data = f.read()
+            else:
+                data = http_get(self.alerts_url, timeout=20)
+            self.rt.ingest_alerts(data, now)
+            with self.rt.lock:
+                n = len(self.rt.sa_alerts)
+            print(f"[alerts:{self.name}] {n} alert(s) in feed")
+        except Exception as ex:
+            # a broken alerts endpoint must not mark the departures stale
+            with self.rt.lock:
+                self.rt.alerts_error = str(ex)
+            print(f"[alerts:{self.name}] fetch failed: {ex}", file=sys.stderr)
+
 
 class TimetableSource:
     """Fixed printed timetable — for agencies with no public feed (Bear
@@ -427,6 +583,7 @@ class TimetableSource:
         self.args = args
         self.tz = tz
         self.poll_seconds = 3600          # nothing to poll
+        self.alerts_poll_seconds = 0      # no alert feed either
         self.rt = RealtimeState()
         self.static = True
         self.static_error = None
@@ -437,6 +594,9 @@ class TimetableSource:
         print(f"[static:{self.name}] fixed timetable source (no feed)")
 
     def load_realtime(self, now):
+        pass
+
+    def load_alerts(self, now):
         pass
 
 
@@ -452,6 +612,9 @@ class EtdSource:
 
     DEFAULT_URL = ("https://api.bart.gov/api/etd.aspx"
                    "?cmd=etd&orig={station}&key={token}&json=y")
+    # BART publishes service advisories on its own endpoint, not in the ETD
+    # payload; they are system-wide, so every board on this source shows them.
+    DEFAULT_BSA_URL = "https://api.bart.gov/api/bsa.aspx?cmd=bsa&key={token}&json=y"
 
     def __init__(self, name, scfg, cfg, args, tz):
         self.name = name
@@ -459,13 +622,18 @@ class EtdSource:
         self.args = args
         self.tz = tz
         url = scfg.get("etd_url", self.DEFAULT_URL)
+        bsa = scfg.get("bsa_url", self.DEFAULT_BSA_URL)
         token = scfg.get("token", "")
         if not token:  # empty token -> drop the key parameter entirely
             url = url.replace("key={token}&", "").replace("&key={token}", "")
+            bsa = bsa.replace("key={token}&", "").replace("&key={token}", "")
         self.url = (url.replace("{token}", token)
                        .replace("{station}", scfg.get("station", "ALL")))
+        self.bsa_url = bsa.replace("{token}", token)
         self.station_name = scfg.get("station", "")
         self.poll_seconds = scfg.get("poll_seconds", cfg.get("rt_poll_seconds", 20))
+        self.alerts_poll_seconds = scfg.get(
+            "alerts_poll_seconds", cfg.get("alerts_poll_seconds", 120))
         self.estimates = []          # guarded by self.rt.lock
         self.rt = RealtimeState()    # reused for lock / fetched_at / error
         self.static = True           # nothing to load; keep Source interface
@@ -522,6 +690,164 @@ class EtdSource:
                 self.rt.error = str(ex)
             print(f"[etd:{self.name}] fetch failed: {ex}", file=sys.stderr)
 
+    def load_alerts(self, now):
+        """BART service advisories (bsa.aspx), shaped like GTFS-rt alerts."""
+        if not self.bsa_url:
+            return
+        try:
+            if self.args.offline:
+                path = os.path.join(self.args.offline, f"{self.name}_bsa.json")
+                if not os.path.exists(path):
+                    return
+                with open(path) as f:
+                    doc = json.load(f)
+            else:
+                doc = json.loads(http_get(self.bsa_url, timeout=20).decode("utf-8-sig"))
+            raw = (doc.get("root") or {}).get("bsa") or []
+            if isinstance(raw, dict):        # single advisory comes unwrapped
+                raw = [raw]
+            alerts = []
+            for i, b in enumerate(raw):
+                cdata = b.get("description") or {}
+                text = (cdata.get("#cdata-section") if isinstance(cdata, dict)
+                        else cdata) or ""
+                text = text.strip()
+                # the "all clear" placeholder is not an alert
+                if not text or "no delays reported" in text.lower():
+                    continue
+                kind = str(b.get("type", "")).upper()
+                alerts.append({
+                    "id": f"bsa-{b.get('@id', i)}",
+                    "text": text,
+                    "desc": "",
+                    "url": "",
+                    "effect": "SIGNIFICANT_DELAYS" if kind == "DELAY" else "",
+                    "severity": "SEVERE" if kind == "EMERGENCY" else "WARNING",
+                    "periods": [],       # BART drops advisories when they end
+                    "selectors": [],     # system-wide
+                })
+            with self.rt.lock:
+                self.rt.sa_alerts = alerts
+                self.rt.alerts_fetched_at, self.rt.alerts_error = now, None
+            print(f"[alerts:{self.name}] {len(alerts)} advisory(ies)")
+        except Exception as ex:
+            with self.rt.lock:
+                self.rt.alerts_error = str(ex)
+            print(f"[alerts:{self.name}] fetch failed: {ex}", file=sys.stderr)
+
+# ---------------------------------------------------------------- app
+
+class WeatherSource:
+    """Current conditions + hourly outlook from Open-Meteo (no API key).
+
+    Open-Meteo is keyless and its forecast only moves hourly, so this polls
+    on its own slow cadence in its own thread. Every failure is non-fatal:
+    the panel hides the weather rows and keeps showing departures.
+    """
+
+    URL = ("https://api.open-meteo.com/v1/forecast"
+           "?latitude={lat}&longitude={lon}"
+           "&current=temperature_2m,weather_code"
+           "&hourly=temperature_2m,precipitation_probability"
+           "&daily=temperature_2m_max,temperature_2m_min,sunset"
+           "&temperature_unit=fahrenheit&timeformat=unixtime"
+           "&timezone={tz}&forecast_days=2")
+
+    # WMO weather interpretation codes -> short label
+    CODES = {
+        0: "Clear", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+        45: "Fog", 48: "Rime fog",
+        51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
+        56: "Freezing drizzle", 57: "Freezing drizzle",
+        61: "Light rain", 63: "Rain", 65: "Heavy rain",
+        66: "Freezing rain", 67: "Freezing rain",
+        71: "Light snow", 73: "Snow", 75: "Heavy snow", 77: "Snow grains",
+        80: "Rain showers", 81: "Rain showers", 82: "Heavy showers",
+        85: "Snow showers", 86: "Snow showers",
+        95: "Thunderstorm", 96: "Thunderstorm", 99: "Thunderstorm",
+    }
+
+    def __init__(self, wcfg, cfg, args, tz):
+        self.wcfg = wcfg
+        self.args = args
+        self.tzname = cfg["timezone"]
+        self.poll_seconds = wcfg.get("poll_seconds", 900)
+        self.hours = wcfg.get("hours_shown", 12)
+        self.lock = threading.Lock()
+        self.raw = None
+        self.error = None
+        self.fetched_at = None
+
+    def load(self):
+        try:
+            if self.args.offline:
+                with open(os.path.join(self.args.offline, "weather.json")) as f:
+                    raw = json.load(f)
+            else:
+                url = self.URL.format(lat=self.wcfg["lat"], lon=self.wcfg["lon"],
+                                      tz=urllib.parse.quote(self.tzname))
+                raw = json.loads(http_get(url, timeout=20))
+            with self.lock:
+                self.raw, self.error, self.fetched_at = raw, None, time.time()
+        except Exception as ex:
+            with self.lock:
+                self.error = str(ex)[:200]
+            print(f"[weather] fetch failed: {ex}")
+
+    def snapshot(self, now):
+        with self.lock:
+            raw, err, fetched = self.raw, self.error, self.fetched_at
+        if raw is None:
+            return {"error": err or "no weather data yet", "age": None,
+                    "hourly": []}
+        try:
+            cur = raw.get("current") or {}
+            hourly = raw.get("hourly") or {}
+            daily = raw.get("daily") or {}
+            times = hourly.get("time") or []
+            temps = hourly.get("temperature_2m") or []
+            pops = hourly.get("precipitation_probability") or []
+
+            # the outlook starts at the first hour ahead of now
+            start = next((i for i, t in enumerate(times) if t > now), len(times))
+            ahead = []
+            for i in range(start, min(start + self.hours, len(times))):
+                t = temps[i] if i < len(temps) else None
+                if t is None:
+                    continue
+                p = pops[i] if i < len(pops) else None
+                ahead.append({"time": times[i],
+                              "temp_f": round(t),
+                              "temp_c": round((t - 32) * 5 / 9),
+                              "pop": round(p) if p is not None else 0})
+
+            # hi/lo and sunset come from the daily row covering `now`
+            dts = daily.get("time") or []
+            di = max((i for i, t in enumerate(dts) if t <= now), default=0)
+
+            def dval(key):
+                v = daily.get(key) or []
+                return v[di] if di < len(v) else None
+
+            hi, lo, sunset = (dval("temperature_2m_max"),
+                              dval("temperature_2m_min"), dval("sunset"))
+            temp = cur.get("temperature_2m")
+            return {
+                "temp_f": round(temp) if temp is not None else None,
+                "temp_c": round((temp - 32) * 5 / 9) if temp is not None else None,
+                "cond": self.CODES.get(cur.get("weather_code"), ""),
+                "hi_f": round(hi) if hi is not None else None,
+                "lo_f": round(lo) if lo is not None else None,
+                "sunset": sunset,
+                "rain_pct": ahead[0]["pop"] if ahead else 0,
+                "hourly": ahead,
+                "age": round(now - fetched) if fetched else None,
+                "error": err,
+            }
+        except Exception as ex:
+            return {"error": f"malformed weather payload: {ex}", "age": None,
+                    "hourly": []}
+
 # ---------------------------------------------------------------- app
 
 class App:
@@ -537,26 +863,69 @@ class App:
                    "timetable": TimetableSource}.get(scfg.get("type"), Source)
             self.sources[name] = cls(name, scfg, cfg, args, self.tz)
 
+        wcfg = cfg.get("weather") or {}
+        self.weather = (WeatherSource(wcfg, cfg, args, self.tz)
+                        if wcfg.get("lat") is not None
+                        and wcfg.get("lon") is not None else None)
+
     def now(self):
         if self.args.now:
             return self._fake_now
         return time.time()
 
     def start(self):
-        for src in self.sources.values():
-            src.load_static()
-            src.load_realtime(self.now())
-        if not self.args.offline:
+        """Bring the feeds up.
+
+        Offline mode loads synchronously: the files are local, and the testing
+        paths want a fully populated app before the first request.
+
+        Otherwise every source loads on its own thread and this returns at
+        once, so main() can bind the socket before any feed is fetched. A
+        kiosk browser pointed here at boot then gets a page — boards reading
+        "loading schedule…" until their source lands — instead of a connection
+        refusal, which a kiosk browser has no way to retry. It also means one
+        slow agency delays only its own cards rather than the whole board:
+        AC Transit's schedule alone takes 15-30 s to parse on a Pi.
+        """
+        if self.args.offline:
             for src in self.sources.values():
-                threading.Thread(target=self._poll_source, args=(src,),
+                src.load_static()
+                src.load_realtime(self.now())
+                src.load_alerts(self.now())
+            if self.weather:
+                self.weather.load()
+            return
+
+        for src in self.sources.values():
+            threading.Thread(target=self._poll_source, args=(src,),
+                             daemon=True).start()
+            if src.alerts_poll_seconds:
+                threading.Thread(target=self._poll_alerts, args=(src,),
                                  daemon=True).start()
-            threading.Thread(target=self._static_refresher, daemon=True).start()
+        threading.Thread(target=self._static_refresher, daemon=True).start()
+        if self.weather:
+            threading.Thread(target=self._poll_weather, daemon=True).start()
 
     def _poll_source(self, src):
+        # the schedule parse happens here rather than before the socket binds;
+        # until it finishes this source's boards report "not loaded yet"
+        src.load_static()
         # each source has its own cadence (rate-limited APIs poll slower)
         while True:
-            time.sleep(src.poll_seconds)
             src.load_realtime(self.now())
+            time.sleep(src.poll_seconds)
+
+    def _poll_alerts(self, src):
+        # alerts change on the order of hours; polling them at the departure
+        # cadence would burn the same rate limit for no new information
+        while True:
+            src.load_alerts(self.now())
+            time.sleep(src.alerts_poll_seconds)
+
+    def _poll_weather(self):
+        while True:
+            self.weather.load()
+            time.sleep(self.weather.poll_seconds)
 
     def _static_refresher(self):
         while True:
@@ -569,9 +938,16 @@ class App:
     def board_json(self):
         now = self.now()
         out = {"now": now, "timezone": self.cfg["timezone"], "boards": [],
-               "sources": {}, "default_tab": self.cfg.get("default_tab", "work")}
+               "sources": {}, "default_tab": self.cfg.get("default_tab", "work"),
+               # consumed by the portrait wall panel (/panel); harmless to the
+               # tabbed dashboard, which ignores them
+               "weather": self.weather.snapshot(now) if self.weather else None,
+               "house": self.cfg.get("house", {}),
+               "panel": self.cfg.get("panel", {})}
         n_shown = self.cfg.get("departures_shown", 3)
 
+        # active alerts per source, resolved once and shared by its boards
+        src_alerts = {}
         for name, src in self.sources.items():
             with src.rt.lock:
                 out["sources"][name] = {
@@ -580,7 +956,24 @@ class App:
                     "rt_error": src.rt.error,
                     "static_error": src.static_error,
                     "poll_seconds": src.poll_seconds,
+                    "alerts_age": (round(now - src.rt.alerts_fetched_at)
+                                   if src.rt.alerts_fetched_at else None),
+                    "alerts_error": src.rt.alerts_error,
                 }
+                src_alerts[name] = [a for a in src.rt.alerts()
+                                    if alert_active(a, now)]
+
+        # alerts that reach at least one board, deduped across boards:
+        # key -> {"alert": public dict, "boards": [titles]}
+        shown_alerts = {}
+
+        def attach(entry, source, matched):
+            entry["alerts"] = [alert_public(a) for a in matched]
+            for a in matched:
+                slot = shown_alerts.setdefault(
+                    (source, a["id"], a["text"]),
+                    {"alert": alert_public(a) | {"source": source}, "boards": []})
+                slot["boards"].append(entry["title"])
 
         for bcfg in self.cfg["boards"]:
             src = self.sources[bcfg["source"]]
@@ -655,6 +1048,8 @@ class App:
                     entry["error"] = f"ETD fetch failed: {rt_err}"
                 if color_override:
                     entry["route_color"] = color_override
+                # BART advisories are system-wide — every ETD board gets them
+                attach(entry, bcfg["source"], src_alerts[bcfg["source"]])
                 out["boards"].append(entry)
                 continue
             with src.lock:
@@ -675,12 +1070,13 @@ class App:
             with src.rt.lock:
                 rt_updates = dict(src.rt.updates)
                 rt_cancelled = set(src.rt.cancelled)
-                rt_alerts = list(src.rt.alerts)
 
             deps = []
             sched_tids = set()
+            shown_tids = set()      # every trip this board can put on screen
             for d in st.departures(board, now):
                 sched_tids.add(d["trip_id"])
+                shown_tids.add(d["trip_id"])
                 item = {
                     "sched": d["sched"],
                     "time": d["sched"],
@@ -736,6 +1132,7 @@ class App:
                     if frac < 0.8:
                         continue
                     headsign = st.stop_names.get(u["last_stop"], "")
+                shown_tids.add(tid)
                 deps.append({
                     "sched": stu["time"],
                     "time": stu["time"],
@@ -750,11 +1147,19 @@ class App:
                               if x["cancelled"] and now - 30 <= x["sched"] <= now + 3600]
             entry["departures"] = sorted(upcoming + cancelled_soon,
                                          key=lambda x: x["time"])[:n_shown]
-            entry["alerts"] = [a["text"] for a in rt_alerts
-                               if not (a["routes"] or a["stops"])
-                               or (board["route_ids"] & a["routes"])
-                               or board["stop_id"] in a["stops"]]
+            attach(entry, bcfg["source"],
+                   [a for a in src_alerts[bcfg["source"]]
+                    if alert_matches(a, route_ids=board["route_ids"],
+                                     stop_ids={board["stop_id"]},
+                                     trip_ids=shown_tids)])
             out["boards"].append(entry)
+
+        # loudest first, so a single-line display (the wall panel) leads with
+        # the alert that actually changes what you do
+        out["alerts"] = sorted(
+            ({**slot["alert"], "boards": slot["boards"]}
+             for slot in shown_alerts.values()),
+            key=lambda a: (-a["rank"], a["text"]))
         return out
 
 # ---------------------------------------------------------------- find-stops
@@ -814,6 +1219,7 @@ def find_stops(app, text):
 
 def make_handler(app):
     index_path = os.path.join(BASE_DIR, "index.html")
+    panel_path = os.path.join(BASE_DIR, "panel.html")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -832,6 +1238,9 @@ def make_handler(app):
             path = self.path.split("?")[0]
             if path in ("/", "/index.html"):
                 with open(index_path, "rb") as f:
+                    self._send(200, "text/html; charset=utf-8", f.read())
+            elif path in ("/panel", "/panel.html"):
+                with open(panel_path, "rb") as f:
                     self._send(200, "text/html; charset=utf-8", f.read())
             elif path == "/api/board":
                 self._send(200, "application/json", json.dumps(app.board_json()).encode())
@@ -876,13 +1285,20 @@ def main():
     except Exception:
         pass
 
-    app.start()
-    if all(s.static is None for s in app.sources.values()):
-        sys.exit("no GTFS static feed could be loaded; check network / URLs / token")
-
+    # Bind before the feeds are fetched. Constructing the server listens
+    # immediately, so a kiosk browser that starts alongside us connects and
+    # gets a board rather than a refusal it will never retry — the cards fill
+    # in as each source finishes loading.
     port = args.port or cfg.get("port", 8146)
     server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(app))
+
+    app.start()
+    if args.offline and all(s.static is None for s in app.sources.values()):
+        sys.exit(f"no GTFS static feed loaded from {args.offline}; "
+                 f"expected <source>_gtfs.zip there")
+
     print(f"Departure board running at http://localhost:{port}")
+    print(f"Wall panel (1080x1920 portrait) at http://localhost:{port}/panel")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
